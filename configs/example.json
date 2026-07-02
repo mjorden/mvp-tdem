@@ -1,31 +1,60 @@
 {
+  "_comment": "Sidecar metadata for a helicopter TDEM survey CSV deliverable.",
+
   "survey": {
-    "name": "example_survey",
-    "system": "generic"
+    "name":        "example_survey",
+    "system":      "VTEM",
+    "date":        "2024-06-15",
+    "contractor":  "Geotech Ltd.",
+    "epsg":        32611
   },
+
   "column_map": {
-    "line":      "LINE",
-    "fiducial":  "FID",
-    "easting":   "X",
-    "northing":  "Y",
-    "elevation": "ELEV_M",
-    "alt_agl":   "ALT_M",
-    "gates":     ["G01","G02","G03","G04","G05","G06","G07","G08","G09","G10"]
+    "line":       "LINE",
+    "fiducial":   "FID",
+    "easting":    "Easting",
+    "northing":   "Northing",
+    "elevation":  "Elevation",
+    "dem":        "DEM",
+    "latitude":   "Latitude",
+    "longitude":  "Longitude",
+    "sfz_prefix": "SFz",
+    "sfz_n":      30,
+    "sfz_format": "bracket",
+    "_sfz_format_note": "'bracket' → SFz[0]..SFz[29]; 'underscore' → SFz_00..SFz_29; 'zero_padded' → SFz00..SFz29"
   },
-  "waveform": {
-    "base_frequency_hz": 25,
-    "tx_moment_Am2": 1e5,
-    "gate_times_ms": [0.1,0.15,0.22,0.33,0.47,0.68,1.0,1.47,2.15,3.16]
+
+  "system": {
+    "tx_moment_am2":            420000,
+    "tx_frequency_hz":          25,
+    "tx_waveform":              "bipolar_square",
+    "tx_on_time_us":            4000,
+    "rx_coil_area_m2":          99.7,
+    "tx_rx_separation_m":       12.4,
+    "rx_orientation":           "Z",
+    "system_noise_floor":       3e-4,
+    "_noise_units":             "pV/(A·m⁴) — used as per-gate noise floor when std columns absent"
   },
+
+  "gate_times_ms": [
+    0.0084, 0.0124, 0.0184, 0.0272, 0.0404, 0.0600, 0.0888,
+    0.1312, 0.1944, 0.2880, 0.4268, 0.6320, 0.9360, 1.3860,
+    2.0524, 3.0400, 4.5012, 6.6680, 9.8760, 14.624, 21.664,
+    32.076, 47.520, 70.380, 104.23, 154.44, 228.76, 338.80,
+    501.96, 743.40
+  ],
+  "_gate_times_note": "Center of each gate window in milliseconds after waveform turnoff. Length must equal sfz_n.",
+
   "inversion": {
-    "n_layers": 30,
-    "depth_min_m": 0.5,
-    "depth_max_m": 300,
-    "rho_initial": 100,
-    "rho_min": 1,
-    "rho_max": 10000,
-    "alpha_s": 1e-4,
-    "alpha_z": 1.0,
-    "max_iter": 20
+    "n_layers":        30,
+    "depth_min_m":     0.5,
+    "depth_max_m":     300,
+    "rho_initial":     100,
+    "rho_min":         1,
+    "rho_max":         10000,
+    "alpha_s":         1e-4,
+    "alpha_z":         1.0,
+    "max_iter":        20,
+    "use_noise_floor": true
   }
 }
