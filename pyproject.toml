@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "mvp-tdem"
+version = "0.1.0"
+description = "Airborne TDEM processing and 1D/2D inversion pipeline"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "pandas",
+    "scipy",
+    "SimPEG",
+    "empymod",
+    "matplotlib",
+    "plotly",
+    "click",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-cov", "black", "ruff"]
+
+[tool.ruff]
+line-length = 100
