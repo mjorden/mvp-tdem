@@ -245,3 +245,13 @@ def test_quantized_gates_no_mass_spikes():
     df = _along_line_despike(df, gate_cols, window=5, threshold=4.0,
                              min_gates=3, noise_floor=NOISE_FLOOR)
     assert df["_qc_spike"].sum() == 0, "Quantized flat gates must not mass-flag"
+
+
+def test_good_gate_array_warns_on_flag_desync():
+    """#41: a gate lacking its _qc_gate_ flag after run_qc must warn, not
+    silently degrade to 'unflagged'."""
+    df = _make_sounding(n=5)
+    df_qc = run_qc(df, _make_config())
+    df_desync = df_qc.drop(columns=["_qc_gate_03"])
+    with pytest.warns(UserWarning, match="out of sync"):
+        good_gate_array(df_desync)

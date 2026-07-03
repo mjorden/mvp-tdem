@@ -54,6 +54,7 @@ def calibrate(
     out = soundings.copy()
     scale = 1.0 / (denom_fixed * moment)
     for col in stacked_gate_columns(out):
+        idx = col.removeprefix("gate_")  # full index string, not col[-2:] (#41)
         out[col] = out[col] * scale
-        out[f"gate_std_{col[-2:]}"] = out[f"gate_std_{col[-2:]}"] * scale
+        out[f"gate_std_{idx}"] = out[f"gate_std_{idx}"] * scale
     return out, moment_mode

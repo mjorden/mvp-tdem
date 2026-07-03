@@ -125,5 +125,6 @@ def read_lines(paths: list[Path]) -> pd.DataFrame:
 
 
 def em_gate_columns(em_df: pd.DataFrame) -> list[str]:
-    """Ordered raw gate column names (g00, g01, ...)."""
-    return sorted(c for c in em_df.columns if c.startswith("g") and c[1:].isdigit())
+    """Ordered raw gate column names (g00, g01, ...), numeric gate order (#41)."""
+    return sorted((c for c in em_df.columns if c.startswith("g") and c[1:].isdigit()),
+                  key=lambda c: int(c[1:]))

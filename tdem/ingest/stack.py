@@ -70,4 +70,6 @@ def stack_soundings(em_df: pd.DataFrame, n_stack: int, trim_frac: float = 0.1) -
 
 
 def stacked_gate_columns(df: pd.DataFrame) -> list[str]:
-    return sorted(c for c in df.columns if c.startswith("gate_") and not c.startswith("gate_std_"))
+    """gate_NN columns in numeric gate order (#41 — lexicographic breaks past 99)."""
+    cols = [c for c in df.columns if c.startswith("gate_") and not c.startswith("gate_std_")]
+    return sorted(cols, key=lambda c: int(c.removeprefix("gate_")))

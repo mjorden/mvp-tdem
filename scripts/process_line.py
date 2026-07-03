@@ -44,11 +44,7 @@ def main(csv_path, config_path, line_id, all_lines, out_dir):
     if all_lines:
         line_ids = sorted(df["line"].unique())
     else:
-        # match type: line ids in the CSV are usually ints
-        try:
-            line_id = int(line_id)
-        except ValueError:
-            pass
+        # load_line compares ids as strings (#19) — no coercion needed
         line_ids = [line_id]
 
     for lid in line_ids:

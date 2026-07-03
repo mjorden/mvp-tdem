@@ -49,16 +49,39 @@ def load_survey(csv_path: str | Path, config_path: str | Path) -> tuple[pd.DataF
 
 
 def load_line(df: pd.DataFrame, line_id: int | str) -> pd.DataFrame:
-    """Return all soundings on a single flight line."""
-    mask = df["line"] == line_id
+    """
+    Return all soundings on a single flight line.
+
+    Ids are compared as strings on both sides (#19), so '--line 1000' matches
+    whether the frame carries int, string, or mixed line ids.
+    """
+    mask = df["line"].astype(str) == str(line_id)
     if not mask.any():
-        raise ValueError(f"Line {line_id!r} not found. Available: {sorted(df['line'].unique())}")
+        avail = sorted(df["line"].astype(str).unique())
+        raise ValueError(f"Line {line_id!r} not found. Available: {avail}")
     return df[mask].reset_index(drop=True)
 
 
+_GATE_COL_RE = re.compile(r"^sfz_(\d+)$")
+
+
+def gate_index(col: str) -> int:
+    """Parse the gate index out of an sfz_* column name: 'sfz_07' → 7 (#41)."""
+    m = _GATE_COL_RE.match(col)
+    if not m:
+        raise ValueError(f"Not a gate column: {col!r}")
+    return int(m.group(1))
+
+
 def gate_columns(df: pd.DataFrame) -> list[str]:
-    """Return ordered list of sfz_* column names present in df."""
-    return sorted(c for c in df.columns if re.match(r"^sfz_\d+$", c))
+    """
+    Return sfz_* column names ordered numerically by gate index.
+
+    Numeric, not lexicographic (#41): past 99 gates a string sort yields
+    sfz_09, sfz_10, sfz_100, sfz_101, ..., sfz_11 — silently pairing wrong
+    gate values with gate_times_ms.
+    """
+    return sorted((c for c in df.columns if _GATE_COL_RE.match(c)), key=gate_index)
 
 
 def gate_array(df: pd.DataFrame) -> np.ndarray:
@@ -107,7 +130,16 @@ def _read_csv(path: Path) -> pd.DataFrame:
 
     from io import StringIO
     if not is_geosoft:
-        return pd.read_csv(StringIO("\n".join(lines)), sep=r"[\s,]+", engine="python")
+        # Sniff the delimiter (#30): a regex separator cannot represent empty
+        # fields — sep=r"[\s,]+" silently shifts every value after a blank
+        # cell one column left, landing gate amplitudes in neighbouring gates.
+        # Comma files get a literal comma so empty fields parse as NaN in
+        # place; the whitespace regex is reserved for space-delimited files,
+        # where an empty field is unrepresentable to begin with.
+        header_line = next((l for l in lines if l.strip()), "")
+        sep = "," if "," in header_line else r"\s+"
+        return pd.read_csv(StringIO("\n".join(lines)), sep=sep,
+                           engine="python", skipinitialspace=True)
 
     header: list[str] | None = None
     current_line: str | None = None
@@ -160,6 +192,11 @@ def _apply_column_map(raw: pd.DataFrame, col_map: dict) -> pd.DataFrame:
       bracket     : SFz[0] .. SFz[N-1]
       underscore  : SFz_00 .. SFz_N-1
       zero_padded : SFz00  .. SFzN-1
+
+    Emits exactly the documented schema (#36): the standardised id columns
+    plus one sfz_NN column per gate. Raw gate columns and unmapped raw
+    channels (e.g. ingest-emitted SFz_std[i]) are dropped — one variable,
+    one column.
     """
     rename = {}
     for std, key in _RENAME_COLS.items():
@@ -186,10 +223,15 @@ def _apply_column_map(raw: pd.DataFrame, col_map: dict) -> pd.DataFrame:
             f"CSV columns: {list(raw.columns)}"
         )
 
+    gate_std = []
     for i, raw_col in enumerate(gate_raw):
-        df[f"sfz_{i:02d}"] = pd.to_numeric(raw[raw_col], errors="coerce")
+        name = f"sfz_{i:02d}"
+        df[name] = pd.to_numeric(raw[raw_col], errors="coerce")
+        gate_std.append(name)
 
-    return df
+    # documented schema only (#36): standardised ids + one column per gate
+    keep = [std for std in _RENAME_COLS if std in df.columns] + gate_std
+    return df[keep]
 
 
 def _gate_column_names(prefix: str, n: int, fmt: str) -> list[str]:
@@ -243,14 +285,29 @@ _DUMMY_SENTINELS = np.array([-9999.0, -99999.0, -999999.0, 999999.0, 9999999.0])
 _DUMMY_HUGE = 1e30
 
 
-def _replace_dummies(series: pd.Series) -> pd.Series:
-    """NaN out dummy sentinels (tolerant match) and |x| >= 1e30 values."""
+# Coordinate/geometry channels: sentinel replacement must be exact here (#29)
+_COORD_COLS = ("easting", "northing", "elevation", "dem", "latitude", "longitude")
+
+
+def _replace_dummies(series: pd.Series, *, tolerant: bool = True) -> pd.Series:
+    """
+    NaN out dummy sentinels and |x| >= 1e30 values.
+
+    tolerant=True matches sentinels within rtol=1e-6 — catches
+    -9999.0000001-style float dirt on data channels, where sentinels
+    (>= 1e3 in magnitude) are far from physics-scale values (~1e-12..1e3).
+    Coordinate channels must use tolerant=False (#29): the same tolerance is
+    a ±1 m window around northing 999,999 and ±10 m around 9,999,999 — real
+    positions there would be silently NaN'd. Exporters write coordinate
+    sentinels exactly, so exact equality is the right test.
+    """
     vals = series.to_numpy(dtype=float)
     bad = np.abs(vals) >= _DUMMY_HUGE
     for s in _DUMMY_SENTINELS:
-        # rel tolerance catches -9999.0000001-style float dirt; sentinels are
-        # >= 1e3 in magnitude so real physics-scale data (~1e-12..1e3) is safe
-        bad |= np.isclose(vals, s, rtol=1e-6, atol=0.0)
+        if tolerant:
+            bad |= np.isclose(vals, s, rtol=1e-6, atol=0.0)
+        else:
+            bad |= vals == s
     return series.where(~bad)
 
 
@@ -268,9 +325,11 @@ def _clean(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     for col in numeric_cols:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # 2. dummy sentinels → NaN on ALL numeric channels, not just gates
+    # 2. dummy sentinels → NaN on ALL numeric channels, not just gates;
+    #    coordinates use exact matching so real positions near a sentinel
+    #    value survive (#29)
     for col in numeric_cols:
-        df[col] = _replace_dummies(df[col])
+        df[col] = _replace_dummies(df[col], tolerant=col not in _COORD_COLS)
 
     # 3. drop rows with unusable altimetry (NaN or non-positive radar height);
     #    reported, since dem is required for inversion geometry

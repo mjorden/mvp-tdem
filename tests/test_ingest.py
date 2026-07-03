@@ -206,3 +206,22 @@ def test_assign_lines_heading_fallback_segments_l_shape():
 def test_assign_fids_monotonic_deciseconds():
     out = assign_fids(pd.DataFrame({"t_utc": [T0, T0 + 0.5, T0 + 1.0]}))
     assert list(out["fid"]) == [0, 5, 10]
+
+
+# ---------------------------------------------------------------------------
+# gate-column identity (#41)
+# ---------------------------------------------------------------------------
+
+def test_em_gate_columns_numeric_order():
+    """#41: g100 must sort after g11, not between g10 and g11."""
+    from tdem.ingest.readers import em_gate_columns
+    df = pd.DataFrame({c: [0.0] for c in ("g100", "g9", "g10", "g101", "g11", "polarity")})
+    assert em_gate_columns(df) == ["g9", "g10", "g11", "g100", "g101"]
+
+
+def test_stacked_gate_columns_numeric_order():
+    """#41: gate_100 must sort after gate_11; gate_std_* excluded."""
+    from tdem.ingest.stack import stacked_gate_columns
+    cols = ("gate_100", "gate_09", "gate_10", "gate_11", "gate_std_09", "gate_std_100")
+    df = pd.DataFrame({c: [0.0] for c in cols})
+    assert stacked_gate_columns(df) == ["gate_09", "gate_10", "gate_11", "gate_100"]
