@@ -17,6 +17,7 @@ dependencies = [
     "plotly",
     "click",
     "pyyaml",
+    "pyproj",
 ]
 
 [project.optional-dependencies]

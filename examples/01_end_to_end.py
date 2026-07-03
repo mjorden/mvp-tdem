@@ -51,7 +51,9 @@ model.to_csv(OUT / "line_2000_model.csv", index=False)
 # The synthetic survey has a 5 Ω·m conductor at 20–80 m depth between
 # northing 4901500–4902500 — it should show up as a red (conductive) lens
 # in the section, against the 200 Ω·m background.
-mid = model[(model.depth_top > 20) & (model.depth_top < 80)]
-print(f"median rho in the 20–80 m window: {mid.rho.median():.0f} ohm-m "
-      f"(background is 200, conductor is 5)")
+depth_win = (model.depth_top > 20) & (model.depth_top < 80)
+on_body = model.northing.between(4901500, 4902500)
+print(f"median rho at 20–80 m depth: "
+      f"{model[depth_win & on_body].rho.median():.0f} ohm-m over the conductor (true 5), "
+      f"{model[depth_win & ~on_body].rho.median():.0f} ohm-m off it (true 200)")
 print(f"outputs in {OUT}")

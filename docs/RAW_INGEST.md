@@ -127,10 +127,10 @@ drops data, and it says so.)
   survey config (already a sidecar field).
 - `Elevation` = sensor elevation ASL. GPS gives ellipsoidal height; apply
   geoid correction (config: geoid model or fixed offset per survey area).
-- `DEM` = Elevation − altimeter height AGL. This keeps DEM consistent
-  with what `qc.dem_consistency` and the altitude flag expect (bird
-  height = Elevation − DEM). Sampling an external DEM raster instead is
-  a Phase-2 option; deriving from the altimeter needs no extra data.
+- `DEM` = the altimeter height AGL itself. Repo convention: despite the
+  name, the DEM column carries bird height — `qc._altitude_flag`
+  range-checks it directly and `invert` uses it as `bird_height_m`;
+  ground elevation is derived downstream as Elevation − DEM.
 - **Line segmentation:** prefer an explicit flight-plan file
   (line id ↔ waypoint pairs). Fallback: automatic — split where heading
   changes > 60° sustained for > 5 s or ground speed drops below survey

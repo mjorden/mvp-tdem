@@ -1,0 +1,40 @@
+# Hardware config for the MVPGeo helicopter TDEM instrument (v0).
+# Single source of truth for anything that is a property of the build,
+# not of a flight — the emitted sidecar's `system` block and gate times
+# are GENERATED from this file (tdem/ingest/emit.py). Never hand-edit a
+# sidecar to disagree with it.
+
+instrument:
+  name: mvpgeo-heli-tdem
+  version: "0.1"
+
+rx:
+  gain: 1000.0          # logger volts per coil volt
+  coil_area_m2: 99.7    # effective (turns x area)
+  dz_m: 0.0             # Rx vertical offset from Tx loop plane
+  orientation: Z
+
+tx:
+  moment_nominal_am2: 420000     # used when no Tx-current stream is logged
+  n_turns: 4
+  loop_area_m2: 530.93           # pi * 13^2
+  loop_radius_m: 13.0
+  geometry: concentric_loop
+  frequency_hz: 25
+  waveform: bipolar_square
+  on_time_us: 4000
+
+# V/(A·m⁴), same units as calibrated gate data
+noise_floor: 1.0e-12
+
+# Gate-centre times in ms after turnoff. All inside the 16 ms off-time
+# at 25 Hz / 4 ms on-time (load._validate enforces this on every emit).
+gate_times_ms: [
+  0.0084, 0.0124, 0.0184, 0.0272, 0.0404, 0.0600, 0.0888,
+  0.1312, 0.1944, 0.2880, 0.4268, 0.6320, 0.9360, 1.3860,
+  2.0524, 3.0400, 4.5012, 6.6680, 9.8760, 14.624,
+]
+
+clock:
+  sync: gps_messages    # GPS time messages latched against the Rx clock
+  max_residual_ms: 1.0  # clock-fit residual above this is a hard error

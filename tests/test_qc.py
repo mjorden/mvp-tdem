@@ -141,13 +141,22 @@ def test_altitude_too_high():
 # dem_consistency_flag
 # ---------------------------------------------------------------------------
 
-def test_dem_above_elevation_flagged():
-    df = _make_sounding(n=3)
-    # DEM (35) < Elevation (1450) normally; make DEM > Elevation for row 2
-    df.loc[2, "dem"] = 2000.0
+def test_gps_dropout_jump_flagged():
+    """#3: abrupt jump in derived ground elevation → flagged."""
+    df = _make_sounding(n=20)
+    df.loc[10, "elevation"] = 1450.0 - 60.0   # 60 m GPS dropout at one sounding
     df = _dem_consistency_flag(df)
-    assert df.loc[2, "_qc_dem_mismatch"]
+    assert df.loc[10, "_qc_dem_mismatch"]
     assert not df.loc[0, "_qc_dem_mismatch"]
+
+
+def test_negative_ellipsoid_ground_not_flagged():
+    """#3: uniformly negative ground ellipsoid height (coastal geoid) is valid."""
+    df = _make_sounding(n=20)
+    df["elevation"] = -5.0   # ground at -40 m ellipsoid height, bird at 35 m AGL
+    df = _dem_consistency_flag(df)
+    assert not df["_qc_dem_mismatch"].any(), \
+        "Negative ellipsoid ground height must not be flagged (geoid undulation)"
 
 
 # ---------------------------------------------------------------------------

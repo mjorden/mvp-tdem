@@ -82,12 +82,74 @@ _RENAME_COLS = {
 }
 
 
+_GEOSOFT_LINE_RE = re.compile(r"^(Line|Tie)\s+(\S+)\s*$", re.IGNORECASE)
+
+
 def _read_csv(path: Path) -> pd.DataFrame:
-    """Read ASCII CSV, skipping Geosoft-style comment lines (start with '/')."""
+    """
+    Read an ASCII deliverable — flat CSV or Geosoft XYZ (#2).
+
+    Geosoft XYZ specifics handled here:
+    - the column-name header is itself a '/'-prefixed comment line — the last
+      comment line before the first data row is used as the header
+    - 'Line 1000' / 'Tie 2005' records separate blocks and are the ONLY place
+      the line id lives; they are captured and forward-filled into a
+      __geosoft_line column
+    - '*' dummies survive as NaN via per-column to_numeric coercion later
+
+    A file is treated as Geosoft when it contains Line/Tie records or starts
+    with a '/' comment; otherwise it goes straight to pandas as a flat table.
+    """
     lines = path.read_text().splitlines()
-    data_lines = [l for l in lines if not l.strip().startswith("/")]
+
+    is_geosoft = any(_GEOSOFT_LINE_RE.match(l.strip()) for l in lines[:200]) \
+        or (lines and lines[0].lstrip().startswith("/"))
+
     from io import StringIO
-    return pd.read_csv(StringIO("\n".join(data_lines)), sep=r"[\s,]+", engine="python")
+    if not is_geosoft:
+        return pd.read_csv(StringIO("\n".join(lines)), sep=r"[\s,]+", engine="python")
+
+    header: list[str] | None = None
+    current_line: str | None = None
+    rows: list[list[str]] = []
+    line_ids: list[str | None] = []
+    n_bad = 0
+
+    for raw in lines:
+        s = raw.strip()
+        if not s:
+            continue
+        if s.startswith("/"):
+            tokens = s.lstrip("/").split()
+            if tokens and not rows:
+                header = tokens          # last comment before data wins
+            continue
+        m = _GEOSOFT_LINE_RE.match(s)
+        if m:
+            current_line = m.group(2)
+            continue
+        tokens = re.split(r"[\s,]+", s)
+        if header and len(tokens) != len(header):
+            n_bad += 1                   # short/garbled record — skip, count
+            continue
+        rows.append(tokens)
+        line_ids.append(current_line)
+
+    if header is None:
+        raise ValueError(
+            f"{path.name}: Geosoft-style file but no '/'-comment header line found "
+            "before the data. Cannot determine column names."
+        )
+    if not rows:
+        raise ValueError(f"{path.name}: no data rows parsed.")
+    if n_bad:
+        print(f"[load] {path.name}: skipped {n_bad} malformed records "
+              f"(token count != {len(header)} columns)")
+
+    df = pd.DataFrame(rows, columns=header)
+    if any(lid is not None for lid in line_ids):
+        df["__geosoft_line"] = line_ids
+    return df
 
 
 def _apply_column_map(raw: pd.DataFrame, col_map: dict) -> pd.DataFrame:
@@ -106,6 +168,11 @@ def _apply_column_map(raw: pd.DataFrame, col_map: dict) -> pd.DataFrame:
             rename[raw_col] = std
 
     df = raw.rename(columns=rename)
+
+    # Geosoft XYZ: line ids come from 'Line NNNN' separator records (#2),
+    # which take precedence over any mapped line column
+    if "__geosoft_line" in df.columns:
+        df["line"] = df.pop("__geosoft_line")
 
     prefix = col_map.get("sfz_prefix", "SFz")
     n      = col_map.get("sfz_n", 30)
@@ -170,25 +237,53 @@ def _validate(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     return df
 
 
-def _clean(df: pd.DataFrame, config: dict) -> pd.DataFrame:
-    """Replace dummy fill values, drop dead soundings, coerce coordinate types."""
-    DUMMY_VALUES = {-9999.0, -99999.0, 999999.0, 9999999.0, 1e31}
+# Common ASCII dummy sentinels. Matched with tolerance (#16); anything with
+# |x| >= 1e30 (Geosoft double-dummy ±1e32 etc.) is also treated as a dummy.
+_DUMMY_SENTINELS = np.array([-9999.0, -99999.0, -999999.0, 999999.0, 9999999.0])
+_DUMMY_HUGE = 1e30
 
+
+def _replace_dummies(series: pd.Series) -> pd.Series:
+    """NaN out dummy sentinels (tolerant match) and |x| >= 1e30 values."""
+    vals = series.to_numpy(dtype=float)
+    bad = np.abs(vals) >= _DUMMY_HUGE
+    for s in _DUMMY_SENTINELS:
+        # rel tolerance catches -9999.0000001-style float dirt; sentinels are
+        # >= 1e3 in magnitude so real physics-scale data (~1e-12..1e3) is safe
+        bad |= np.isclose(vals, s, rtol=1e-6, atol=0.0)
+    return series.where(~bad)
+
+
+def _clean(df: pd.DataFrame, config: dict) -> pd.DataFrame:
+    """Coerce numerics, replace dummy fill values, drop dead soundings.
+
+    Order matters (#8): coercion FIRST (Geosoft '*' → NaN via to_numeric),
+    then dummy replacement on all numeric channels (#16), then filters —
+    every dropped row is reported.
+    """
     gate_cols = gate_columns(df)
 
-    for col in gate_cols:
-        df[col] = df[col].where(~df[col].isin(DUMMY_VALUES))
+    # 1. coerce every non-id column to numeric ('*' and junk → NaN)
+    numeric_cols = [c for c in df.columns if c not in ("line", "fiducial")]
+    for col in numeric_cols:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    df = df[df["dem"] > 0].copy()
+    # 2. dummy sentinels → NaN on ALL numeric channels, not just gates
+    for col in numeric_cols:
+        df[col] = _replace_dummies(df[col])
 
+    # 3. drop rows with unusable altimetry (NaN or non-positive radar height);
+    #    reported, since dem is required for inversion geometry
+    bad_dem = ~(df["dem"] > 0)          # NaN > 0 is False → included here
+    if bad_dem.any():
+        print(f"[load] Dropped {int(bad_dem.sum())} soundings with missing/"
+              f"non-positive dem (radar altimeter).")
+    df = df[~bad_dem].copy()
+
+    # 4. drop dead soundings (every gate NaN)
     all_nan = df[gate_cols].isna().all(axis=1)
-    n_dropped = all_nan.sum()
-    if n_dropped > 0:
-        print(f"[load] Dropped {n_dropped} soundings with all-NaN gates.")
+    if all_nan.any():
+        print(f"[load] Dropped {int(all_nan.sum())} soundings with all-NaN gates.")
     df = df[~all_nan].reset_index(drop=True)
-
-    for col in ["easting", "northing", "elevation", "dem"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
 
     return df

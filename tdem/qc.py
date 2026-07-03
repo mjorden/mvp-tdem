@@ -126,18 +126,39 @@ def _altitude_flag(df: pd.DataFrame, alt_min_m: float, alt_max_m: float) -> pd.D
     return df
 
 
-def _dem_consistency_flag(df: pd.DataFrame) -> pd.DataFrame:
+def _dem_consistency_flag(
+    df: pd.DataFrame,
+    jump_threshold_m: float = 15.0,
+    window: int = 7,
+) -> pd.DataFrame:
     """
-    Flag soundings where GPS ellipsoid elevation is below the radar AGL reading.
+    Flag GPS/radar inconsistency via abrupt jumps in derived ground elevation.
 
-    DEM (radar altimeter) measures height above ground; Elevation is GPS height
-    above ellipsoid. If DEM > Elevation, the ground would be below sea level
-    relative to the ellipsoid — physically impossible in most surveys and indicates
-    a GPS dropout or radar lock-on artefact.
+    Ground elevation = GPS ellipsoid elevation − radar AGL. Its absolute value
+    is NOT diagnostic: negative ellipsoid ground heights are physically valid
+    (geoid undulation reaches ±100 m; sub-sea-level terrain exists) (#3).
+    What IS diagnostic of a GPS dropout or radar lock-on artefact is ground
+    elevation jumping tens of metres between adjacent soundings — terrain
+    doesn't do that at 50 m station spacing, but a re-converging GPS or a
+    radar bouncing off canopy does.
+
+    Flags soundings whose ground elevation deviates from the along-line
+    rolling median by more than jump_threshold_m.
     """
-    elev = df["elevation"].to_numpy(dtype=float)
-    dem  = df["dem"].to_numpy(dtype=float)
-    df["_qc_dem_mismatch"] = dem > elev
+    ground = (df["elevation"].to_numpy(dtype=float)
+              - df["dem"].to_numpy(dtype=float))
+    flag = np.zeros(len(df), dtype=bool)
+
+    lines = df["line"].unique() if "line" in df.columns else [None]
+    for line_id in lines:
+        idx = df.index[df["line"] == line_id] if line_id is not None else df.index
+        vals = ground[idx]
+        if len(vals) < window:
+            continue
+        med = _rolling_median(vals, window // 2)
+        flag[idx] = np.abs(vals - med) > jump_threshold_m
+
+    df["_qc_dem_mismatch"] = flag
     return df
 
 

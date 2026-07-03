@@ -1,0 +1,27 @@
+# Per-survey config for raw ingest: everything that changes between
+# surveys but not between flights. Pairs with configs/instrument.yaml;
+# scripts/ingest_flight.py combines the two into the emitted sidecar.
+
+survey:
+  name: example_survey
+  date: "2026-07-02"
+  epsg: 32611
+  geoid_offset_m: -20.0   # ellipsoidal - orthometric, fixed per survey area (MVP)
+
+ingest:
+  n_stack: 25             # half-cycles per sounding (0.5 s at 25 Hz base freq)
+  trim_frac: 0.1          # trimmed from EACH tail before the stack mean
+  max_gap_s: 2.0          # never interpolate nav/current across wider gaps
+
+# Copied verbatim into the sidecar for the downstream inversion.
+inversion:
+  n_layers: 30
+  depth_min_m: 0.5
+  depth_max_m: 300
+  rho_initial: 100
+  rho_min: 1
+  rho_max: 10000
+  alpha_s: 1.0e-4
+  alpha_z: 1.0
+  max_iter: 20
+  use_noise_floor: true
