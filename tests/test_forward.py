@@ -144,7 +144,7 @@ def test_simulation_cache_reused(fwd):
 
 def test_forward_from_config():
     config_path = Path(__file__).parent.parent / "configs" / "example.json"
-    config = json.loads(config_path.read_text())
+    config = json.loads(config_path.read_text(encoding="utf-8"))
     fwd = forward_from_config(config)
     assert fwd.n_layers == config["inversion"]["n_layers"]
     assert len(fwd.gate_times_s) == len(config["gate_times_ms"])
