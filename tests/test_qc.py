@@ -231,3 +231,17 @@ def test_good_gate_array_nan_at_noise_floor():
     df_qc  = run_qc(df, config)
     arr    = good_gate_array(df_qc)
     assert np.any(np.isnan(arr)), "Flagged gates should be NaN in gate array"
+
+
+def test_quantized_gates_no_mass_spikes():
+    """#7: heavily quantized (identical) gate values must not mass-flag."""
+    df = _make_sounding(n=30)
+    gate_cols = gate_columns(df)
+    # quantize the last 4 gates to a single repeated value (ASCII rounding)
+    for col in gate_cols[-4:]:
+        df[col] = float(f"{df[col].iloc[0]:.3g}")
+    # tiny per-sounding jitter on one of them — sub-noise, must NOT spike
+    df[gate_cols[-1]] += np.linspace(0, 1e-18, 30)
+    df = _along_line_despike(df, gate_cols, window=5, threshold=4.0,
+                             min_gates=3, noise_floor=NOISE_FLOOR)
+    assert df["_qc_spike"].sum() == 0, "Quantized flat gates must not mass-flag"

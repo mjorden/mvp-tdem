@@ -71,7 +71,7 @@ def run_qc(
     df = _altitude_flag(df, alt_min_m, alt_max_m)
     df = _dem_consistency_flag(df)
     df = _along_line_despike(df, gate_cols, despike_window, despike_threshold,
-                             despike_min_gates)
+                             despike_min_gates, noise_floor=noise_floor)
     df = _monotonicity_flag(df, gate_cols, mono_n_early, mono_max_reversals)
 
     df["sounding_mask"] = _combine_sounding_flags(df)
@@ -168,6 +168,8 @@ def _along_line_despike(
     window: int,
     threshold: float,
     min_gates: int = 3,
+    noise_floor: float = 0.0,
+    rel_floor: float = 0.01,
 ) -> pd.DataFrame:
     """
     Per-gate lateral median filter along each flight line.
@@ -178,6 +180,13 @@ def _along_line_despike(
     >= min_gates deviate simultaneously — a real cultural hit contaminates
     many gates at once, whereas single-gate exceedances at 3–4 MAD are
     expected by chance across 30 gates.
+
+    The MAD is floored at a physically meaningful scale (#7):
+        mad >= rel_floor * |running median| + noise_floor
+    ASCII deliverables quantize late-time gates to 3–4 significant figures,
+    so the raw MAD can collapse to exactly 0 across whole stretches; an
+    absolute-epsilon fallback would then flag every sounding that differs
+    at all from its median.
     """
     n_deviating = np.zeros(len(df), dtype=int)
 
@@ -192,7 +201,9 @@ def _along_line_despike(
             vals = df.loc[idx, col].to_numpy(dtype=float)
             med  = _rolling_median(vals, window)
             mad  = _rolling_mad(vals, med, window)
-            mad  = np.where(mad == 0, np.nanmedian(np.abs(vals - med)) + 1e-30, mad)
+            # physically-scaled floor (#7): never below rel_floor of the local
+            # signal level nor the system noise floor
+            mad  = np.maximum(mad, rel_floor * np.abs(med) + noise_floor)
             n_deviating[idx] += (np.abs(vals - med) > threshold * mad).astype(int)
 
     df["_qc_spike"] = n_deviating >= min_gates

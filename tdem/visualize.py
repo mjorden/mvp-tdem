@@ -2,7 +2,7 @@
 Visualization for stitched 1D TDEM inversion results.
 
 plot_section()  — 2D resistivity cross-section for one flight line
-                  (pcolormesh, log-colour, elevation-referenced, RMS strip)
+                  (pcolormesh, log-colour, elevation-referenced, chi misfit strip)
 plot_decays()   — observed decay curves per sounding, coloured by line position
 plot_sounding_fit() — observed vs predicted decay for a single sounding
 
@@ -42,7 +42,8 @@ def plot_section(
     Stitched resistivity section for one line: distance vs elevation, colour = log10(rho).
 
     Each sounding is drawn as a column of layer cells hung from its ground
-    elevation, so topography is honoured. An RMS misfit strip is drawn above.
+    elevation, so topography is honoured. A chi misfit strip is drawn above
+    (chi ~ 1 = data fit to within assigned errors).
     """
     if not result.soundings:
         raise ValueError("LineResult has no soundings to plot.")
@@ -71,7 +72,7 @@ def plot_section(
 
     rho = np.column_stack([s.rho for s in S])          # (n_layers, n_soundings)
     elev = np.array([s.elevation for s in S])
-    rms = np.array([s.rms for s in S])
+    chi = np.array([s.chi for s in S])
 
     vmin = rho_min or max(np.nanpercentile(rho, 2), 1e-2)
     vmax = rho_max or np.nanpercentile(rho, 98)
@@ -102,9 +103,10 @@ def plot_section(
     cb = fig.colorbar(pc, ax=ax, pad=0.01, aspect=30)
     cb.set_label("Resistivity (Ω·m)")
 
-    # RMS strip
-    ax_rms.bar(dist, rms, width=np.diff(edges), color="0.5")
-    ax_rms.set_ylabel("RMS", fontsize=8)
+    # chi misfit strip (chi ~ 1 = fit to errors)
+    ax_rms.bar(dist, chi, width=np.diff(edges), color="0.5")
+    ax_rms.axhline(1.0, color="tab:red", lw=0.8, ls="--")
+    ax_rms.set_ylabel("chi", fontsize=8)
     ax_rms.tick_params(labelsize=7)
     ax_rms.set_title(title or f"Line {result.line} — stitched 1D resistivity section",
                      fontsize=11)

@@ -25,9 +25,9 @@ def test_recover_halfspace(fwd):
     """Noise-free half-space data should invert back to ~the true resistivity."""
     rho_true = 50.0
     d_obs = fwd.predict(np.full(N_LAYERS, rho_true), BIRD)
-    rho, rms, ok = invert_sounding(fwd, d_obs, BIRD, rho_initial=200.0, max_iter=40)
+    rho, chi, ok = invert_sounding(fwd, d_obs, BIRD, rho_initial=200.0, max_iter=40)
     assert ok
-    assert rms < 0.05
+    assert chi < 1.0  # noise-free data must fit to well within assigned errors
     # TDEM equivalence: resistive structure is weakly resolved, so allow a
     # generous factor-3 band around the geometric mean rather than exact recovery
     gm = 10 ** np.mean(np.log10(rho))
@@ -49,7 +49,7 @@ def test_nan_gates_excluded(fwd):
     """Masked gates shouldn't break the inversion."""
     d_obs = fwd.predict(np.full(N_LAYERS, 100.0), BIRD)
     d_obs[5:] = np.nan  # keep only 5 early gates
-    rho, rms, ok = invert_sounding(fwd, d_obs, BIRD)
+    rho, chi, ok = invert_sounding(fwd, d_obs, BIRD)
     assert np.all(np.isfinite(rho))
 
 
@@ -129,7 +129,7 @@ def test_to_frame_layout(fwd):
     result = invert_line(df, _config(), fwd=fwd, verbose=False)
     frame = result.to_frame()
     assert len(frame) == 2 * N_LAYERS
-    assert {"distance", "depth_top", "rho", "rms"} <= set(frame.columns)
+    assert {"distance", "depth_top", "rho", "chi"} <= set(frame.columns)
     # second sounding is 50 m along the line
     assert frame[frame["fiducial"] == 1001]["distance"].iloc[0] == pytest.approx(50.0)
 

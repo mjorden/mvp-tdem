@@ -48,7 +48,7 @@ class SoundingResult:
     fiducial: object
     rho: np.ndarray           # resistivity per layer, ohm·m
     depths: np.ndarray        # depth to top of each layer, m
-    rms: float                # log-space RMS data misfit
+    chi: float                # error-normalized misfit; chi ~ 1 = fit to errors (#4)
     n_gates_used: int
     converged: bool
 
@@ -73,7 +73,7 @@ class LineResult:
                     "layer": i,
                     "depth_top": d,
                     "rho": r,
-                    "rms": s.rms,
+                    "chi": s.chi,
                     "converged": s.converged,
                 })
         df = pd.DataFrame(rows)
@@ -112,12 +112,18 @@ def invert_sounding(
     d_obs        : (n_gates,) observed moment-normalized dB/dt; NaN = excluded
     bird_height_m: sensor height above ground for this sounding
     rho_initial  : scalar or per-layer starting/reference model (ohm·m)
-    rel_error    : assumed relative data error (5% default) — sets W_d
+    rel_error    : assumed relative data error — sets W_d (#17: plumb from
+                   config's inversion.rel_error)
     noise_floor  : additional absolute error floor, same units as d_obs
 
     Returns
     -------
-    rho (n_layers,), rms (log-space), converged
+    rho (n_layers,), chi, converged
+
+    chi is the error-normalized misfit (#4):
+        chi = sqrt(mean(((ln pred − ln obs) / sd_log)²))
+    chi ≈ 1 means the data are fit to within their assigned errors;
+    chi >> 1 underfit; chi << 1 overfit (errors overestimated).
     """
     n = fwd.n_layers
     d_obs = np.asarray(d_obs, dtype=float)
@@ -158,8 +164,10 @@ def invert_sounding(
 
     m = result.x
     pred = fwd.predict_log(m, bird_height_m)
-    rms = float(np.sqrt(np.mean((np.log(pred[use]) - log_d) ** 2)))
-    return 10.0 ** m, rms, bool(result.success)
+    # error-normalized chi (#4) — same weights the misfit was minimized under
+    chi = float(np.sqrt(np.mean(
+        ((np.log(np.maximum(pred[use], 1e-300)) - log_d) / sd_log) ** 2)))
+    return 10.0 ** m, chi, bool(result.success)
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +180,7 @@ def invert_line(
     fwd: TDEMForward | None = None,
     *,
     warm_start: bool = True,
-    rms_retry_threshold: float = 0.3,
+    chi_retry_threshold: float = 2.0,
     verbose: bool = True,
 ) -> LineResult:
     """
@@ -183,9 +191,10 @@ def invert_line(
 
     Warm-start trap guard: a sounding warm-started from a very different
     neighbour (e.g. stepping off a conductor onto resistive ground) can get
-    stuck in a poor local minimum. If a warm-started fit has RMS above
-    rms_retry_threshold, the sounding is re-inverted from the config's
-    rho_initial and the better of the two is kept.
+    stuck in a poor local minimum. If a warm-started fit has chi above
+    chi_retry_threshold (chi ~ 1 = fit to within errors, so 2 = clearly
+    underfit, #4), the sounding is re-inverted from the config's rho_initial
+    and the better of the two is kept.
     """
     inv = config["inversion"]
     noise_floor = config["system"].get("system_noise_floor", 0.0) \
@@ -220,16 +229,17 @@ def invert_line(
             alpha_s=inv["alpha_s"],
             alpha_z=inv["alpha_z"],
             max_iter=inv["max_iter"],
+            rel_error=inv.get("rel_error", 0.05),   # #17
         )
         try:
-            rho, rms, ok = invert_sounding(fwd, data[i], rho_initial=rho_start, **kwargs)
+            rho, chi, ok = invert_sounding(fwd, data[i], rho_initial=rho_start, **kwargs)
             # warm-start trap guard: bad fit from a warm start → retry cold
-            if rms > rms_retry_threshold and warm_start \
+            if chi > chi_retry_threshold and warm_start \
                     and not np.isscalar(rho_start):
-                rho2, rms2, ok2 = invert_sounding(
+                rho2, chi2, ok2 = invert_sounding(
                     fwd, data[i], rho_initial=inv["rho_initial"], **kwargs)
-                if rms2 < rms:
-                    rho, rms, ok = rho2, rms2, ok2
+                if chi2 < chi:
+                    rho, chi, ok = rho2, chi2, ok2
         except ValueError:
             n_failed += 1
             continue
@@ -242,7 +252,7 @@ def invert_line(
             fiducial=row.get("fiducial", i),
             rho=rho,
             depths=depths,
-            rms=rms,
+            chi=chi,
             n_gates_used=int(np.isfinite(data[i]).sum()),
             converged=ok,
         ))
@@ -253,11 +263,11 @@ def invert_line(
     if verbose:
         n_ok = len(result.soundings)
         if n_ok:
-            rms_all = [s.rms for s in result.soundings]
+            chi_all = [s.chi for s in result.soundings]
             print(
                 f"[invert] line {line_id}: {n_ok} soundings inverted, "
                 f"{int(skip.sum())} QC-skipped, {n_failed} failed | "
-                f"median RMS {np.median(rms_all):.3f}"
+                f"median chi {np.median(chi_all):.2f} (1 = fit to errors)"
             )
         else:
             print(f"[invert] line {line_id}: nothing inverted "
