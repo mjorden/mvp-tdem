@@ -32,7 +32,7 @@ pip install -e ".[dev]"
 
 ## Quickstart (synthetic data)
 
-The repo ships with a synthetic 3-line survey (`data/synthetic_survey.csv`, lines `1000`/`2000`/`3000`, buried 5 Ω·m conductor at 20–80 m depth) generated with the same SimPEG physics the inversion uses.
+The repo ships with a synthetic 3-line survey (`data/synthetic_survey.csv`, lines `1000`/`2000`/`3000`, buried 5 Ω·m conductor at 24–77 m depth) generated on an independent fine truth mesh with realistic multiplicative + noise-floor noise (#26, #32).
 
 ```bash
 # Process one flight line end-to-end

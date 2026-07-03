@@ -35,19 +35,19 @@ fwd = forward_from_config(config)
 t_ms = np.asarray(config["gate_times_ms"])
 bird_height = 35.0  # m AGL
 
-# 200 ohm-m background vs. the same with a 5 ohm-m layer at 20-80 m —
+# 200 ohm-m background vs. the same with a 5 ohm-m layer at 24-77 m —
 # the same body scripts/generate_synthetic.py buries in the synthetic survey.
 z = layer_depths(fwd.thicknesses)
 rho_bg = np.full(fwd.n_layers, 200.0)
 rho_cond = rho_bg.copy()
-rho_cond[(z >= 20) & (z <= 80)] = 5.0
+rho_cond[(z >= 24) & (z < 77)] = 5.0
 
 d_bg = fwd.predict(rho_bg, bird_height)
 d_cond = fwd.predict(rho_cond, bird_height)
 
 fig, ax = plt.subplots(figsize=(7, 6))
 ax.loglog(t_ms, d_bg, "o-", label="200 Ω·m halfspace")
-ax.loglog(t_ms, d_cond, "s-", label="+ 5 Ω·m layer, 20–80 m")
+ax.loglog(t_ms, d_cond, "s-", label="+ 5 Ω·m layer, 24–77 m")
 ax.axhline(config["system"]["system_noise_floor"], color="0.5", ls="--",
            label="system noise floor")
 ax.set_xlabel("Time after turnoff (ms)")

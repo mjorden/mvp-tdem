@@ -48,12 +48,12 @@ plot_section(result, OUT / "line_2000_section.png")
 model = result.to_frame()
 model.to_csv(OUT / "line_2000_model.csv", index=False)
 
-# The synthetic survey has a 5 Ω·m conductor at 20–80 m depth between
+# The synthetic survey has a 5 Ω·m conductor at 24–77 m depth between
 # northing 4901500–4902500 — it should show up as a red (conductive) lens
 # in the section, against the 200 Ω·m background.
-depth_win = (model.depth_top > 20) & (model.depth_top < 80)
+depth_win = (model.depth_top > 24) & (model.depth_top < 77)
 on_body = model.northing.between(4901500, 4902500)
-print(f"median rho at 20–80 m depth: "
+print(f"median rho at 24–77 m depth: "
       f"{model[depth_win & on_body].rho.median():.0f} ohm-m over the conductor (true 5), "
       f"{model[depth_win & ~on_body].rho.median():.0f} ohm-m off it (true 200)")
 print(f"outputs in {OUT}")
