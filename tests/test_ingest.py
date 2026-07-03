@@ -134,7 +134,7 @@ def test_calibrate_measured_moment():
 def test_calibrate_falls_back_to_nominal_current_in_gaps():
     txcur = pd.DataFrame({"t_utc": [T0 + 100, T0 + 101], "current_a": [220.0, 220.0]})
     out, mode = calibrate(_stacked(), _INSTRUMENT, txcur_df=txcur)  # sounding outside range
-    assert mode == "measured"
+    assert mode == "measured_with_gaps"
     assert out.loc[0, "gate_00"] == pytest.approx(1e-3)
 
 

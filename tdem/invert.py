@@ -88,10 +88,14 @@ class LineResult:
                     "converged": s.converged,
                 })
         df = pd.DataFrame(rows)
-        # along-line distance from first sounding
         if len(self.soundings) > 1:
-            x0, y0 = self.soundings[0].easting, self.soundings[0].northing
-            df["distance"] = np.hypot(df["easting"] - x0, df["northing"] - y0)
+            east = np.array([s.easting for s in self.soundings])
+            north = np.array([s.northing for s in self.soundings])
+            dx = np.diff(east, prepend=east[0])
+            dy = np.diff(north, prepend=north[0])
+            cum_dist = np.cumsum(np.hypot(dx, dy))
+            n_layers = len(self.soundings[0].depths)
+            df["distance"] = np.repeat(cum_dist, n_layers)
         elif len(df):
             df["distance"] = 0.0
         return df
@@ -162,9 +166,10 @@ def invert_sounding(
     lo, hi = np.log10(rho_min), np.log10(rho_max)
     m = np.clip(_to_log(rho_initial), lo, hi)
 
-    # log-space data weights: sd(log d) ≈ rel_error + floor/d
+    # log-space data weights: sd(log d) ≈ sqrt(rel_error² + (floor/d)²)
     log_d = np.log(d_obs[use])
-    sd_log = rel_error + (noise_floor / d_obs[use] if noise_floor > 0 else 0.0)
+    abs_err = noise_floor / d_obs[use] if noise_floor > 0 else 0.0
+    sd_log = np.sqrt(rel_error**2 + abs_err**2)
     w_d = 1.0 / sd_log
 
     # cell-size-weighted vertical first-difference operator (#11):
@@ -195,7 +200,7 @@ def invert_sounding(
             residuals, m_start,
             bounds=(np.full(n, lo), np.full(n, hi)),
             method="trf",
-            max_nfev=2 * max_iter * (n + 1),             # #15: doubled budget
+            max_nfev=max_iter * (n + 1),
             x_scale="jac",
         )
 
@@ -239,6 +244,10 @@ def invert_line(
     underfit, #4), the sounding is re-inverted from the config's rho_initial
     and the better of the two is kept.
     """
+    # ensure soundings are in along-line order before warm-start chaining
+    if "fiducial" in df_line.columns:
+        df_line = df_line.sort_values("fiducial").reset_index(drop=True)
+
     inv = config["inversion"]
     noise_floor = config["system"].get("system_noise_floor", 0.0) \
         if inv.get("use_noise_floor", True) else 0.0

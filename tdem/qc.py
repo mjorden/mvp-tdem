@@ -95,7 +95,7 @@ def _noise_floor_flag(df: pd.DataFrame, gate_cols: list[str], noise_floor: float
         idx   = col.split("_")[-1]
         flag  = col_to_flag(col)
         vals  = df[col].to_numpy(dtype=float)
-        df[flag] = np.where(np.isnan(vals), True, vals <= noise_floor)
+        df[flag] = np.where(np.isnan(vals), True, vals < noise_floor)
     return df
 
 
@@ -151,12 +151,12 @@ def _dem_consistency_flag(
 
     lines = df["line"].unique() if "line" in df.columns else [None]
     for line_id in lines:
-        idx = df.index[df["line"] == line_id] if line_id is not None else df.index
-        vals = ground[idx]
+        pos = np.where(df["line"] == line_id)[0] if line_id is not None else np.arange(len(df))
+        vals = ground[pos]
         if len(vals) < window:
             continue
         med = _rolling_median(vals, window // 2)
-        flag[idx] = np.abs(vals - med) > jump_threshold_m
+        flag[pos] = np.abs(vals - med) > jump_threshold_m
 
     df["_qc_dem_mismatch"] = flag
     return df
@@ -193,18 +193,19 @@ def _along_line_despike(
     lines = df["line"].unique() if "line" in df.columns else [None]
 
     for line_id in lines:
-        idx = df.index[df["line"] == line_id] if line_id is not None else df.index
-        if len(idx) < 2 * window + 1:
+        pos = np.where(df["line"] == line_id)[0] if line_id is not None else np.arange(len(df))
+        if len(pos) < 2 * window + 1:
             continue
 
         for col in gate_cols:
-            vals = df.loc[idx, col].to_numpy(dtype=float)
+            vals = df[col].to_numpy(dtype=float)[pos]
             med  = _rolling_median(vals, window)
             mad  = _rolling_mad(vals, med, window)
             # physically-scaled floor (#7): never below rel_floor of the local
             # signal level nor the system noise floor
             mad  = np.maximum(mad, rel_floor * np.abs(med) + noise_floor)
-            n_deviating[idx] += (np.abs(vals - med) > threshold * mad).astype(int)
+            # 1.4826 converts MAD to a consistent σ estimate for Gaussian noise
+            n_deviating[pos] += (np.abs(vals - med) > threshold * 1.4826 * mad).astype(int)
 
     df["_qc_spike"] = n_deviating >= min_gates
     return df

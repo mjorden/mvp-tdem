@@ -34,7 +34,7 @@ def ingest_flight(flight_dir: str | Path, instrument: dict, survey_cfg: dict) ->
     """
     flight_dir = Path(flight_dir)
     ing   = survey_cfg.get("ingest", {})
-    n_stack   = ing.get("n_stack", 25)
+    n_stack   = ing.get("n_stack", 24)
     trim_frac = ing.get("trim_frac", 0.1)
     max_gap_s = ing.get("max_gap_s", 2.0)
 

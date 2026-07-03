@@ -51,9 +51,12 @@ def plot_section(
     S = result.soundings
     n = len(S)
 
-    # along-line distances (from first sounding)
-    x0, y0 = S[0].easting, S[0].northing
-    dist = np.array([np.hypot(s.easting - x0, s.northing - y0) for s in S])
+    # cumulative arc-length along the flight line
+    east = np.array([s.easting for s in S])
+    north = np.array([s.northing for s in S])
+    dx = np.diff(east, prepend=east[0])
+    dy = np.diff(north, prepend=north[0])
+    dist = np.cumsum(np.hypot(dx, dy))
 
     # column edges midway between soundings
     edges = np.empty(n + 1)

@@ -107,7 +107,7 @@ def _read_csv(path: Path) -> pd.DataFrame:
 
     from io import StringIO
     if not is_geosoft:
-        return pd.read_csv(StringIO("\n".join(lines)), sep=r"[\s,]+", engine="python")
+        return pd.read_csv(StringIO("\n".join(lines)), sep=",")
 
     header: list[str] | None = None
     current_line: str | None = None
@@ -189,6 +189,9 @@ def _apply_column_map(raw: pd.DataFrame, col_map: dict) -> pd.DataFrame:
     for i, raw_col in enumerate(gate_raw):
         df[f"sfz_{i:02d}"] = pd.to_numeric(raw[raw_col], errors="coerce")
 
+    # drop original gate columns now duplicated by the sfz_* ones
+    df = df.drop(columns=[c for c in gate_raw if c in df.columns])
+
     return df
 
 
@@ -248,9 +251,9 @@ def _replace_dummies(series: pd.Series) -> pd.Series:
     vals = series.to_numpy(dtype=float)
     bad = np.abs(vals) >= _DUMMY_HUGE
     for s in _DUMMY_SENTINELS:
-        # rel tolerance catches -9999.0000001-style float dirt; sentinels are
-        # >= 1e3 in magnitude so real physics-scale data (~1e-12..1e3) is safe
-        bad |= np.isclose(vals, s, rtol=1e-6, atol=0.0)
+        # abs tolerance of 0.5 catches float-dirt like -9999.0000001 without
+        # matching real coordinates near sentinel magnitudes (e.g. northing 999,999 m)
+        bad |= np.isclose(vals, s, rtol=0.0, atol=0.5)
     return series.where(~bad)
 
 

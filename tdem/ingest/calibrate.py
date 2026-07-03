@@ -44,9 +44,10 @@ def calibrate(
         # fall back to nominal current inside Tx-log gaps rather than
         # losing the sounding — the EM data itself is fine
         nominal_current = tx["moment_nominal_am2"] / (tx["n_turns"] * tx["loop_area_m2"])
+        has_gaps = np.isnan(current).any()
         current = np.where(np.isnan(current), nominal_current, current)
         moment = current * tx["n_turns"] * tx["loop_area_m2"]
-        moment_mode = "measured"
+        moment_mode = "measured_with_gaps" if has_gaps else "measured"
     else:
         moment = np.full(len(soundings), float(tx["moment_nominal_am2"]))
         moment_mode = "nominal"

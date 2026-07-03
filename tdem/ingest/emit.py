@@ -64,8 +64,8 @@ def emit_survey(
         "Longitude": df["lon"].round(7),
     })
     for i, col in enumerate(gate_cols):
-        out[f"SFz[{i}]"]     = df[col].map(lambda v: f"{v:.6e}")
-        out[f"SFz_std[{i}]"] = df[f"gate_std_{col[-2:]}"].map(lambda v: f"{v:.6e}")
+        out[f"SFz[{i}]"]     = df[col].fillna(_DUMMY).map(lambda v: f"{v:.6e}")
+        out[f"SFz_std[{i}]"] = df[f"gate_std_{col[-2:]}"].fillna(_DUMMY).map(lambda v: f"{v:.6e}")
     out = out.fillna(_DUMMY)
 
     out.to_csv(out_csv, index=False)
