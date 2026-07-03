@@ -37,7 +37,7 @@ def load_survey(csv_path: str | Path, config_path: str | Path) -> tuple[pd.DataF
     csv_path    = Path(csv_path)
     config_path = Path(config_path)
 
-    with open(config_path) as f:
+    with open(config_path, encoding="utf-8") as f:
         config = json.load(f)
 
     raw = _read_csv(csv_path)
@@ -100,7 +100,7 @@ def _read_csv(path: Path) -> pd.DataFrame:
     A file is treated as Geosoft when it contains Line/Tie records or starts
     with a '/' comment; otherwise it goes straight to pandas as a flat table.
     """
-    lines = path.read_text().splitlines()
+    lines = path.read_text(encoding="utf-8").splitlines()
 
     is_geosoft = any(_GEOSOFT_LINE_RE.match(l.strip()) for l in lines[:200]) \
         or (lines and lines[0].lstrip().startswith("/"))

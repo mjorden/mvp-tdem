@@ -68,7 +68,7 @@ def _read_stream(paths: list[Path], required_cols: list[str], sort_by: str) -> p
     """Concatenate one stream's files, coerce numerics, skip bad rows with a count."""
     frames = []
     for path in paths:
-        lines = [l for l in path.read_text().splitlines()
+        lines = [l for l in path.read_text(encoding="utf-8").splitlines()
                  if l.strip() and not l.strip().startswith("#")]
         from io import StringIO
         df = pd.read_csv(StringIO("\n".join(lines)), skipinitialspace=True,

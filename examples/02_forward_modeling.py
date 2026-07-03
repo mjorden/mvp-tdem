@@ -26,7 +26,7 @@ from tdem.forward import forward_from_config, layer_depths
 REPO = Path(__file__).parent.parent
 OUT = REPO / "output" / "examples"
 
-with open(REPO / "configs/example.json") as f:
+with open(REPO / "configs/example.json", encoding="utf-8") as f:
     config = json.load(f)
 
 # One TDEMForward per survey: gate times and layer geometry are fixed,

@@ -72,7 +72,7 @@ def emit_survey(
 
     sidecar = build_sidecar(instrument, survey_cfg, n_gates=len(gate_cols),
                             provenance=provenance)
-    with open(out_config, "w") as f:
+    with open(out_config, "w", encoding="utf-8") as f:
         json.dump(sidecar, f, indent=2)
 
     print(f"[emit] {len(out)} soundings, {out['LINE'].nunique()} lines → {out_csv}")

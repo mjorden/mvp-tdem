@@ -64,7 +64,7 @@ Tie 9000
 
 def _write(tmp_path, text, name="survey.xyz"):
     p = tmp_path / name
-    p.write_text(text)
+    p.write_text(text, encoding="utf-8")
     return p
 
 
@@ -91,7 +91,7 @@ def test_geosoft_star_dummy_coerced(tmp_path):
     }
     import json
     cfg_path = tmp_path / "cfg.json"
-    cfg_path.write_text(json.dumps(cfg))
+    cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
     df, _ = load_survey(_write(tmp_path, GEOSOFT_FILE), cfg_path)
     # '*' elevation row survives load (dem is fine) with elevation NaN — no crash (#8)
     assert len(df) == 5

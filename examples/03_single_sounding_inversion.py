@@ -25,7 +25,7 @@ from tdem.visualize import plot_sounding_fit
 REPO = Path(__file__).parent.parent
 OUT = REPO / "output" / "examples"
 
-with open(REPO / "configs/example.json") as f:
+with open(REPO / "configs/example.json", encoding="utf-8") as f:
     config = json.load(f)
 
 fwd = forward_from_config(config)
