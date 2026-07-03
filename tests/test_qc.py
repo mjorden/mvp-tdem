@@ -156,13 +156,13 @@ def test_dem_above_elevation_flagged():
 
 def test_spike_detected():
     df = _make_sounding(n=20, add_spike_at=10)
-    df = _along_line_despike(df, gate_columns(df), window=5, threshold=3.0)
+    df = _along_line_despike(df, gate_columns(df), window=5, threshold=4.0, min_gates=3)
     assert df.loc[10, "_qc_spike"], "Injected spike sounding should be flagged"
 
 
 def test_no_false_positives_clean_data():
     df = _make_sounding(n=20)
-    df = _along_line_despike(df, gate_columns(df), window=5, threshold=3.0)
+    df = _along_line_despike(df, gate_columns(df), window=5, threshold=4.0, min_gates=3)
     # Clean uniform decay — no soundings should be spiked
     assert df["_qc_spike"].sum() == 0, "No spikes expected in clean monotonic data"
 

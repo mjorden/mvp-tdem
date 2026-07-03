@@ -10,9 +10,15 @@ Usage
 """
 
 import argparse
+import sys
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
-from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from tdem.forward import TDEMForward, layer_thicknesses
 
 
 N_GATES    = 30
@@ -30,17 +36,15 @@ GATE_TIMES_MS = [
 ]
 
 
-def halfspace_response(t_ms: np.ndarray, rho: float, moment: float = 420000) -> np.ndarray:
-    """
-    Approximate 1D half-space dB/dt response in V/(A·m⁴) using late-time approximation.
-    Not a rigorous forward model — for synthetic data shape only.
-    """
-    t = t_ms * 1e-3
-    mu0 = 4 * np.pi * 1e-7
-    sigma = 1.0 / rho
-    # late-time asymptotic dB/dt for a magnetic dipole over a half-space
-    response = (sigma ** 1.5) * (mu0 ** 2.5) / (20 * np.pi ** 1.5) * t ** (-2.5)
-    return response / moment   # normalise by Tx moment
+# Real SimPEG 1D forward — same physics the inversion uses, so the
+# synthetic survey is a proper end-to-end test of the pipeline.
+_FWD = TDEMForward(GATE_TIMES_MS, layer_thicknesses(0.5, 300, 30),
+                   tx_rx_separation_m=12.4)
+
+
+def sounding_response(rho_layers: np.ndarray, bird_height_m: float) -> np.ndarray:
+    """Moment-normalized |dB/dt| for a layered model at the given bird height."""
+    return _FWD.predict(rho_layers, bird_height_m)
 
 
 def main():
@@ -49,7 +53,6 @@ def main():
     args = parser.parse_args()
 
     rng = np.random.default_rng(42)
-    t   = np.array(GATE_TIMES_MS)
 
     rows = []
     fid  = 1000
@@ -62,13 +65,18 @@ def main():
             elev     = 1450 + rng.normal(0, 2)
             dem      = 35  + rng.normal(0, 1)
 
-            # Conductive body between northing 4901500–4902500 on all lines
+            # Buried conductor (5 Ω·m, 20–80 m depth) between
+            # northing 4901500–4902500 on all lines; 200 Ω·m background
             in_body = 4901500 < northing < 4902500
-            rho = 5.0 if in_body else 200.0
+            rho_layers = np.full(_FWD.n_layers, 200.0)
+            if in_body:
+                from tdem.forward import layer_depths
+                z = layer_depths(_FWD.thicknesses)
+                rho_layers[(z >= 20) & (z <= 80)] = 5.0
 
-            signal  = halfspace_response(t, rho)
-            noise   = signal * rng.normal(0, 0.05, size=len(t))
-            signal  = np.maximum(signal + noise, 1e-14)
+            signal  = sounding_response(rho_layers, dem)
+            noise   = signal * rng.normal(0, 0.03, size=len(signal))
+            signal  = np.maximum(signal + noise, 1e-16)
 
             row = {
                 "LINE":     line_id,

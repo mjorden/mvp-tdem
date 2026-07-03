@@ -40,7 +40,8 @@ def run_qc(
     alt_min_m: float = 10.0,
     alt_max_m: float = 80.0,
     despike_window: int = 5,
-    despike_threshold: float = 3.0,
+    despike_threshold: float = 4.0,
+    despike_min_gates: int = 3,
     mono_n_early: int = 8,
     mono_max_reversals: int = 1,
 ) -> pd.DataFrame:
@@ -54,7 +55,9 @@ def run_qc(
     alt_min_m          : flag soundings with bird altitude below this (m AGL)
     alt_max_m          : flag soundings with bird altitude above this (m AGL)
     despike_window     : half-width of median filter window (soundings, per line)
-    despike_threshold  : flag if |value - median| > threshold * MAD
+    despike_threshold  : gate deviates if |value - median| > threshold * MAD
+    despike_min_gates  : flag sounding only if >= this many gates deviate at once
+                         (controls the family-wise false-positive rate across gates)
     mono_n_early       : number of early gates to check for monotonic decay
     mono_max_reversals : tolerated sign-reversals before flagging (1 allows one blip)
     """
@@ -67,7 +70,8 @@ def run_qc(
     df = _negative_gate_flag(df, gate_cols)
     df = _altitude_flag(df, alt_min_m, alt_max_m)
     df = _dem_consistency_flag(df)
-    df = _along_line_despike(df, gate_cols, despike_window, despike_threshold)
+    df = _along_line_despike(df, gate_cols, despike_window, despike_threshold,
+                             despike_min_gates)
     df = _monotonicity_flag(df, gate_cols, mono_n_early, mono_max_reversals)
 
     df["sounding_mask"] = _combine_sounding_flags(df)
@@ -142,16 +146,19 @@ def _along_line_despike(
     gate_cols: list[str],
     window: int,
     threshold: float,
+    min_gates: int = 3,
 ) -> pd.DataFrame:
     """
     Per-gate lateral median filter along each flight line.
 
     For each gate and each line, compute a running median ± MAD over a window
-    of (2*window + 1) soundings. Flag soundings where the absolute deviation
-    from the median exceeds threshold * MAD. This catches narrow along-line
-    spikes (single-sounding cultural hits) without destroying real anomalies.
+    of (2*window + 1) soundings; a gate "deviates" when its distance from the
+    running median exceeds threshold * MAD. A sounding is flagged only when
+    >= min_gates deviate simultaneously — a real cultural hit contaminates
+    many gates at once, whereas single-gate exceedances at 3–4 MAD are
+    expected by chance across 30 gates.
     """
-    spike_flag = np.zeros(len(df), dtype=bool)
+    n_deviating = np.zeros(len(df), dtype=int)
 
     lines = df["line"].unique() if "line" in df.columns else [None]
 
@@ -165,9 +172,9 @@ def _along_line_despike(
             med  = _rolling_median(vals, window)
             mad  = _rolling_mad(vals, med, window)
             mad  = np.where(mad == 0, np.nanmedian(np.abs(vals - med)) + 1e-30, mad)
-            spike_flag[idx] |= (np.abs(vals - med) > threshold * mad)
+            n_deviating[idx] += (np.abs(vals - med) > threshold * mad).astype(int)
 
-    df["_qc_spike"] = spike_flag
+    df["_qc_spike"] = n_deviating >= min_gates
     return df
 
 

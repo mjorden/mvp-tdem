@@ -172,6 +172,7 @@ def invert_line(
     fwd: TDEMForward | None = None,
     *,
     warm_start: bool = True,
+    rms_retry_threshold: float = 0.3,
     verbose: bool = True,
 ) -> LineResult:
     """
@@ -179,6 +180,12 @@ def invert_line(
 
     df_line should already be QC'd (run_qc) — per-gate flags become NaNs via
     good_gate_array(); soundings with sounding_mask=True are skipped.
+
+    Warm-start trap guard: a sounding warm-started from a very different
+    neighbour (e.g. stepping off a conductor onto resistive ground) can get
+    stuck in a poor local minimum. If a warm-started fit has RMS above
+    rms_retry_threshold, the sounding is re-inverted from the config's
+    rho_initial and the better of the two is kept.
     """
     inv = config["inversion"]
     noise_floor = config["system"].get("system_noise_floor", 0.0) \
@@ -205,19 +212,24 @@ def invert_line(
         if skip[i]:
             continue
         row = df_line.iloc[i]
+        kwargs = dict(
+            bird_height_m=row["dem"],
+            noise_floor=noise_floor,
+            rho_min=inv["rho_min"],
+            rho_max=inv["rho_max"],
+            alpha_s=inv["alpha_s"],
+            alpha_z=inv["alpha_z"],
+            max_iter=inv["max_iter"],
+        )
         try:
-            rho, rms, ok = invert_sounding(
-                fwd,
-                data[i],
-                bird_height_m=row["dem"],
-                noise_floor=noise_floor,
-                rho_initial=rho_start,
-                rho_min=inv["rho_min"],
-                rho_max=inv["rho_max"],
-                alpha_s=inv["alpha_s"],
-                alpha_z=inv["alpha_z"],
-                max_iter=inv["max_iter"],
-            )
+            rho, rms, ok = invert_sounding(fwd, data[i], rho_initial=rho_start, **kwargs)
+            # warm-start trap guard: bad fit from a warm start → retry cold
+            if rms > rms_retry_threshold and warm_start \
+                    and not np.isscalar(rho_start):
+                rho2, rms2, ok2 = invert_sounding(
+                    fwd, data[i], rho_initial=inv["rho_initial"], **kwargs)
+                if rms2 < rms:
+                    rho, rms, ok = rho2, rms2, ok2
         except ValueError:
             n_failed += 1
             continue

@@ -32,8 +32,8 @@
     "rx_coil_area_m2":          99.7,
     "tx_rx_separation_m":       12.4,
     "rx_orientation":           "Z",
-    "system_noise_floor":       3e-4,
-    "_noise_units":             "pV/(A·m⁴) — used as per-gate noise floor when std columns absent"
+    "system_noise_floor":       1e-12,
+    "_noise_units":             "V/(A·m⁴) — same units as gate data; per-gate floor when std columns absent"
   },
 
   "gate_times_ms": [
