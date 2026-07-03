@@ -3,7 +3,7 @@ QC and editing for helicopter TDEM data.
 
 Operations (applied in order by run_qc)
 ----------------------------------------
-1. noise_floor_flag    — mask gates at or below system noise floor
+1. noise_floor_flag    — mask gates noise-dominated in magnitude (|v| ≤ k·floor)
 2. negative_gate_flag  — mask early-time negatives (cultural / instrument artefact)
 3. altitude_flag       — flag soundings outside acceptable bird-height range
 4. dem_consistency     — flag soundings where DEM > Elevation (GPS/radar mismatch)
@@ -39,14 +39,19 @@ def run_qc(
     *,
     alt_min_m: float = 10.0,
     alt_max_m: float = 80.0,
+    noise_floor_k: float = 2.0,
     despike_window: int = 5,
     despike_threshold: float = 4.0,
     despike_min_gates: int = 3,
     mono_n_early: int = 8,
     mono_max_reversals: int = 1,
+    mono_min_rise_frac: float = 0.25,
 ) -> pd.DataFrame:
     """
     Run the full QC suite and return df with added _qc_* columns.
+
+    Works for any input index — flags are computed positionally per line and
+    the caller's index is preserved (#24), so subsetting before QC is safe.
 
     Parameters
     ----------
@@ -54,25 +59,33 @@ def run_qc(
     config             : sidecar config dict (needs system.system_noise_floor)
     alt_min_m          : flag soundings with bird altitude below this (m AGL)
     alt_max_m          : flag soundings with bird altitude above this (m AGL)
+    noise_floor_k      : gate is noise-dominated when |value| <= this multiple
+                         of the system noise floor (#13)
     despike_window     : half-width of median filter window (soundings, per line)
-    despike_threshold  : gate deviates if |value - median| > threshold * MAD
+    despike_threshold  : gate deviates if |value - median| > threshold * sigma,
+                         with sigma = 1.4826 * MAD — threshold is in true
+                         Gaussian-sigma units (#31)
     despike_min_gates  : flag sounding only if >= this many gates deviate at once
                          (controls the family-wise false-positive rate across gates)
     mono_n_early       : number of early gates to check for monotonic decay
-    mono_max_reversals : tolerated sign-reversals before flagging (1 allows one blip)
+    mono_max_reversals : tolerated reversals before flagging (1 allows one blip)
+    mono_min_rise_frac : a reversal counts only when the amplitude rises by more
+                         than this fraction between consecutive gates (#14)
     """
     df = df.copy()
 
     noise_floor = config["system"]["system_noise_floor"]
     gate_cols   = gate_columns(df)
 
-    df = _noise_floor_flag(df, gate_cols, noise_floor)
+    df = _noise_floor_flag(df, gate_cols, noise_floor, k=noise_floor_k)
     df = _negative_gate_flag(df, gate_cols)
     df = _altitude_flag(df, alt_min_m, alt_max_m)
     df = _dem_consistency_flag(df)
     df = _along_line_despike(df, gate_cols, despike_window, despike_threshold,
                              despike_min_gates, noise_floor=noise_floor)
-    df = _monotonicity_flag(df, gate_cols, mono_n_early, mono_max_reversals)
+    df = _monotonicity_flag(df, gate_cols, mono_n_early, mono_max_reversals,
+                            noise_floor=noise_floor,
+                            min_rise_frac=mono_min_rise_frac)
 
     df["sounding_mask"] = _combine_sounding_flags(df)
 
@@ -84,18 +97,25 @@ def run_qc(
 # Individual QC steps
 # ---------------------------------------------------------------------------
 
-def _noise_floor_flag(df: pd.DataFrame, gate_cols: list[str], noise_floor: float) -> pd.DataFrame:
+def _noise_floor_flag(
+    df: pd.DataFrame, gate_cols: list[str], noise_floor: float, k: float = 2.0
+) -> pd.DataFrame:
     """
-    Mask individual gates at or below the system noise floor.
+    Mask individual gates that are noise-dominated: |value| <= k * noise_floor.
 
-    noise_floor is in the same units as the data (V/(A·m⁴)).
-    Writes _qc_gate_<nn> = True where gate is at/below noise floor.
+    noise_floor is in the same units as the data (V/(A·m⁴)). Testing magnitude
+    rather than signed value (#13) means geophysically real late-time negatives
+    are treated exactly like positives of the same amplitude — early negatives
+    remain _negative_gate_flag's job — and gates at S/N up to k are masked as
+    noise-dominated rather than only those literally at/below the floor.
+    NaN gates are not flagged here: they are already unusable and stay NaN in
+    good_gate_array() regardless.
+    Writes _qc_gate_<nn> = True where the gate is noise-dominated.
     """
     for col in gate_cols:
-        idx   = col.split("_")[-1]
-        flag  = col_to_flag(col)
-        vals  = df[col].to_numpy(dtype=float)
-        df[flag] = np.where(np.isnan(vals), True, vals <= noise_floor)
+        flag = col_to_flag(col)
+        vals = df[col].to_numpy(dtype=float)
+        df[flag] = np.abs(vals) <= k * noise_floor
     return df
 
 
@@ -149,14 +169,12 @@ def _dem_consistency_flag(
               - df["dem"].to_numpy(dtype=float))
     flag = np.zeros(len(df), dtype=bool)
 
-    lines = df["line"].unique() if "line" in df.columns else [None]
-    for line_id in lines:
-        idx = df.index[df["line"] == line_id] if line_id is not None else df.index
-        vals = ground[idx]
+    for pos in _line_positions(df):
+        vals = ground[pos]
         if len(vals) < window:
             continue
         med = _rolling_median(vals, window // 2)
-        flag[idx] = np.abs(vals - med) > jump_threshold_m
+        flag[pos] = np.abs(vals - med) > jump_threshold_m
 
     df["_qc_dem_mismatch"] = flag
     return df
@@ -174,15 +192,18 @@ def _along_line_despike(
     """
     Per-gate lateral median filter along each flight line.
 
-    For each gate and each line, compute a running median ± MAD over a window
-    of (2*window + 1) soundings; a gate "deviates" when its distance from the
-    running median exceeds threshold * MAD. A sounding is flagged only when
-    >= min_gates deviate simultaneously — a real cultural hit contaminates
-    many gates at once, whereas single-gate exceedances at 3–4 MAD are
-    expected by chance across 30 gates.
+    For each gate and each line, compute a running median over a window of
+    (2*window + 1) soundings and a robust scale estimate
+        sigma = 1.4826 * MAD
+    (the Gaussian consistency constant, #31 — so threshold is in true sigma
+    units: threshold=4 is a 4-sigma test, not the 2.7-sigma test raw MAD
+    gives). A gate "deviates" when |value - median| > threshold * sigma.
+    A sounding is flagged only when >= min_gates deviate simultaneously — a
+    real cultural hit contaminates many gates at once, whereas single-gate
+    exceedances at 3-4 sigma are expected by chance across 30 gates.
 
-    The MAD is floored at a physically meaningful scale (#7):
-        mad >= rel_floor * |running median| + noise_floor
+    sigma is floored at a physically meaningful scale (#7):
+        sigma >= rel_floor * |running median| + noise_floor
     ASCII deliverables quantize late-time gates to 3–4 significant figures,
     so the raw MAD can collapse to exactly 0 across whole stretches; an
     absolute-epsilon fallback would then flag every sounding that differs
@@ -190,21 +211,19 @@ def _along_line_despike(
     """
     n_deviating = np.zeros(len(df), dtype=int)
 
-    lines = df["line"].unique() if "line" in df.columns else [None]
-
-    for line_id in lines:
-        idx = df.index[df["line"] == line_id] if line_id is not None else df.index
-        if len(idx) < 2 * window + 1:
+    for pos in _line_positions(df):
+        if len(pos) < 2 * window + 1:
             continue
 
         for col in gate_cols:
-            vals = df.loc[idx, col].to_numpy(dtype=float)
+            vals = df[col].to_numpy(dtype=float)[pos]
             med  = _rolling_median(vals, window)
             mad  = _rolling_mad(vals, med, window)
+            sigma = 1.4826 * mad  # Gaussian consistency constant (#31)
             # physically-scaled floor (#7): never below rel_floor of the local
             # signal level nor the system noise floor
-            mad  = np.maximum(mad, rel_floor * np.abs(med) + noise_floor)
-            n_deviating[idx] += (np.abs(vals - med) > threshold * mad).astype(int)
+            sigma = np.maximum(sigma, rel_floor * np.abs(med) + noise_floor)
+            n_deviating[pos] += (np.abs(vals - med) > threshold * sigma).astype(int)
 
     df["_qc_spike"] = n_deviating >= min_gates
     return df
@@ -215,22 +234,49 @@ def _monotonicity_flag(
     gate_cols: list[str],
     n_early: int,
     max_reversals: int,
+    noise_floor: float = 0.0,
+    min_rise_frac: float = 0.25,
 ) -> pd.DataFrame:
     """
     Flag soundings whose early-time gate sequence is non-monotonically decaying.
 
-    Healthy TDEM decays monotonically in log-space. Multiple reversals in the
-    early gates indicate powerline coupling, cultural EM, or system noise.
+    Healthy TDEM decays monotonically in log-space; powerline coupling and
+    cultural EM produce large upward excursions. The test (#14) is on
+    log(|x| + noise_floor) — a true log (log1p was a no-op at gate amplitudes
+    of 1e-7..1e-12), with the floor keeping noise-dominated wiggles compressed
+    — and a rise only counts as a reversal when the amplitude grows by more
+    than min_rise_frac between consecutive gates, so a fractional noise
+    uptick is not weighted like a 10x powerline hit. NaN gates are bridged by
+    carrying the last finite value forward, so a dummy gate can neither hide
+    nor fake a reversal. Sign flips are invisible to |x|; early negatives are
+    _negative_gate_flag's job.
     One reversal is tolerated (mono_max_reversals=1) to allow for a single
     gate-level noise blip.
     """
-    early_cols = gate_cols[:n_early]
-    arr        = np.log1p(np.abs(df[early_cols].to_numpy(dtype=float)))
-    # diff < 0 → decaying (good); diff > 0 → rising (reversal)
-    diffs      = np.diff(arr, axis=1)
-    reversals  = np.sum(diffs > 0, axis=1)
+    early = df[gate_cols[:n_early]].to_numpy(dtype=float)
+    with np.errstate(divide="ignore"):
+        log_amp = np.log(np.abs(early) + noise_floor)
+    # bridge NaN gates: each diff compares consecutive *finite* gates (#14)
+    filled = pd.DataFrame(log_amp).ffill(axis=1).to_numpy()
+    diffs  = np.diff(filled, axis=1)
+    # diff < 0 → decaying (good); a reversal must be a material rise
+    reversals = np.sum(diffs > np.log1p(min_rise_frac), axis=1)
     df["_qc_nonmono"] = reversals > max_reversals
     return df
+
+
+def _line_positions(df: pd.DataFrame) -> list[np.ndarray]:
+    """
+    Positional (iloc) index arrays, one per flight line, in file order.
+
+    Positional throughout (#24): index *labels* are never used to address
+    positional numpy arrays, so run_qc works on any input index — including
+    frames subset by the caller before QC.
+    """
+    if "line" not in df.columns:
+        return [np.arange(len(df))]
+    line_vals = df["line"].to_numpy()
+    return [np.flatnonzero(line_vals == lid) for lid in pd.unique(line_vals)]
 
 
 # ---------------------------------------------------------------------------
@@ -258,7 +304,7 @@ def _print_summary(df: pd.DataFrame, gate_cols: list[str]) -> None:
     print(
         f"[qc] {n_total} soundings — "
         f"{n_bad} flagged ({100*n_bad/n_total:.1f}%) | "
-        f"{n_gate_bad} individual gate values below noise floor"
+        f"{n_gate_bad} individual gate values noise-dominated"
     )
     flag_cols = [c for c in df.columns if c.startswith("_qc_") and not c.startswith("_qc_gate_")]
     for col in flag_cols:
