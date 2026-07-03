@@ -139,14 +139,68 @@ def test_simulation_cache_reused(fwd):
 
 
 # ---------------------------------------------------------------------------
+# Bipolar waveform superposition (#22)
+# ---------------------------------------------------------------------------
+
+# example.json system: 25 Hz bipolar, 4 ms on-time → 16 ms off-time
+BIPOLAR = dict(waveform="bipolar_square", base_frequency_hz=25.0, on_time_ms=4.0)
+
+
+def test_bipolar_bias_grows_late_time():
+    """#22: prior half-cycles suppress the late-time response; the single
+    step-off overpredicts, worst at the last gate (−57% at 14.624 ms for the
+    example system, verified against Ward & Hohmann in the review)."""
+    gates = [0.4268, 1.386, 2.0524, 3.04, 4.5012, 6.668, 9.876, 14.624]
+    thk = layer_thicknesses(0.5, 300, 30)
+    rho = np.full(30, 100.0)
+    d_step = TDEMForward(gates, thk).predict(rho, 35.0)
+    d_bip = TDEMForward(gates, thk, **BIPOLAR).predict(rho, 35.0)
+    bias = (d_bip - d_step) / d_step
+    assert np.all(bias < 0), "bipolar response must sit below single step-off"
+    assert np.all(np.diff(bias) < 0), "bias magnitude must grow with gate time"
+    assert -0.62 < bias[-1] < -0.52, f"last-gate bias {bias[-1]:.3f}, expected ~-0.57"
+    assert -0.06 < bias[0] < 0.0, f"first-gate bias {bias[0]:.3f}, expected ~-0.004"
+
+
+def test_bipolar_converged_by_default_periods():
+    """The superposition series must be converged at the default n_periods."""
+    gates = [1.0, 4.0, 14.624]
+    thk = layer_thicknesses(1.0, 200, 10)
+    rho = np.full(10, 100.0)
+    d4 = TDEMForward(gates, thk, **BIPOLAR).predict(rho, 35.0)
+    d8 = TDEMForward(gates, thk, **{**BIPOLAR, "n_periods": 8}).predict(rho, 35.0)
+    # truncation error at n_periods=4 is ~1.5e-4 on the last gate — three
+    # orders below the 5% assigned data error
+    np.testing.assert_allclose(d4, d8, rtol=5e-4)
+
+
+def test_bipolar_requires_waveform_params():
+    thk = layer_thicknesses(1.0, 200, 8)
+    with pytest.raises(ValueError, match="base_frequency_hz"):
+        TDEMForward(GATE_TIMES_MS, thk, waveform="bipolar_square")
+    with pytest.raises(ValueError, match="Unknown waveform"):
+        TDEMForward(GATE_TIMES_MS, thk, waveform="trapezoid")
+
+
+def test_bipolar_rejects_gates_outside_off_time():
+    thk = layer_thicknesses(1.0, 200, 8)
+    with pytest.raises(ValueError, match="off-time"):
+        TDEMForward([0.5, 17.0], thk, **BIPOLAR)  # off-time is 16 ms
+
+
+# ---------------------------------------------------------------------------
 # Config plumbing
 # ---------------------------------------------------------------------------
 
 def test_forward_from_config():
     config_path = Path(__file__).parent.parent / "configs" / "example.json"
-    config = json.loads(config_path.read_text())
+    config = json.loads(config_path.read_text(encoding="utf-8"))
     fwd = forward_from_config(config)
     assert fwd.n_layers == config["inversion"]["n_layers"]
     assert len(fwd.gate_times_s) == len(config["gate_times_ms"])
     assert fwd.tx_geometry == config["system"]["tx_geometry"]
     assert fwd.tx_loop_radius_m == config["system"]["tx_loop_radius_m"]
+    # #22: the sidecar declares a bipolar square wave — the forward must use it
+    assert fwd.waveform == "bipolar_square"
+    assert fwd.base_frequency_hz == config["system"]["tx_frequency_hz"]
+    assert fwd.on_time_ms == config["system"]["tx_on_time_us"] / 1000.0

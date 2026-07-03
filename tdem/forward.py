@@ -12,9 +12,19 @@ Design notes
 - Layer parameterization: fixed log-spaced interfaces (depth_min→depth_max,
   n_layers); the model vector is log-resistivity per layer. Fixed geometry
   means one mesh for the whole survey — only bird height varies per sounding.
-- Waveform: MVP uses StepOffWaveform. Sidecar gate times are relative to
-  turnoff, which matches. Real system waveforms (VTEM trapezoid, SkyTEM
-  dual-moment) are a Phase 2 refinement.
+- Waveform: gate times are relative to turnoff, matching StepOffWaveform.
+  For a periodic bipolar square wave (waveform="bipolar_square") the measured
+  off-time transient is the superposition of the current turn-off plus all
+  prior alternating-polarity transitions; by linearity we evaluate the same
+  step-off simulation at time-shifted gates and combine (#22):
+
+      d(t) = Σ_k [ s(t + kT) − s(t + kT + t_on)
+                   − s(t + kT + T/2) + s(t + kT + T/2 + t_on) ]
+
+  with T the full period and t_on the on-time. The series converges in ~2
+  periods (terms decay ~t^(-5/2)); n_periods=4 is comfortably converged.
+  Finite turn-off ramp (VTEM trapezoid, SkyTEM dual-moment) remains a
+  Phase 2 refinement.
 """
 
 from __future__ import annotations
@@ -70,6 +80,11 @@ class TDEMForward:
     tx_loop_radius_m   : Tx loop radius, concentric_loop only (#6)
     tx_rx_separation_m : horizontal Tx–Rx offset, offset_dipole only
     rx_dz_m            : Rx vertical offset above the Tx plane (e.g. SkyTEM ~2 m)
+    waveform           : "step_off" (single ideal turn-off) or "bipolar_square"
+                         (periodic superposition of prior half-cycles, #22)
+    base_frequency_hz  : waveform repetition frequency, bipolar_square only
+    on_time_ms         : Tx on-time per half-cycle, bipolar_square only
+    n_periods          : prior periods superposed, bipolar_square only
     """
 
     def __init__(
@@ -80,6 +95,10 @@ class TDEMForward:
         tx_loop_radius_m: float = 13.0,
         tx_rx_separation_m: float = 0.0,
         rx_dz_m: float = 0.0,
+        waveform: str = "step_off",
+        base_frequency_hz: float | None = None,
+        on_time_ms: float | None = None,
+        n_periods: int = 4,
     ):
         self.gate_times_s = np.asarray(gate_times_ms, dtype=float) * 1e-3
         self.thicknesses = np.asarray(thicknesses, dtype=float)
@@ -100,6 +119,50 @@ class TDEMForward:
             )
             tx_rx_separation_m = 1.0
         self.tx_rx_separation_m = float(tx_rx_separation_m)
+
+        if waveform not in ("step_off", "bipolar_square"):
+            raise ValueError(f"Unknown waveform: {waveform!r}")
+        self.waveform = waveform
+        if waveform == "bipolar_square":
+            if not base_frequency_hz or base_frequency_hz <= 0:
+                raise ValueError("bipolar_square requires base_frequency_hz > 0")
+            if on_time_ms is None or on_time_ms < 0:
+                raise ValueError("bipolar_square requires on_time_ms >= 0")
+            if n_periods < 1:
+                raise ValueError("n_periods must be >= 1")
+            period_s = 1.0 / base_frequency_hz
+            on_s = on_time_ms * 1e-3
+            off_s = period_s / 2.0 - on_s
+            if self.gate_times_s.max() >= off_s:
+                raise ValueError(
+                    f"Last gate ({self.gate_times_s.max() * 1e3:.3f} ms) does not fit "
+                    f"inside the off-time ({off_s * 1e3:.3f} ms for "
+                    f"base_frequency_hz={base_frequency_hz}, on_time={on_time_ms} ms)"
+                )
+            self.base_frequency_hz = float(base_frequency_hz)
+            self.on_time_ms = float(on_time_ms)
+            self.n_periods = int(n_periods)
+            # Each period k contributes four transitions (#22): the positive
+            # turn-off at kT (+), positive turn-on at kT + t_on (−), negative
+            # turn-off at kT + T/2 (−), negative turn-on at kT + T/2 + t_on (+).
+            offsets_s, signs = [], []
+            for k in range(self.n_periods):
+                base = k * period_s
+                offsets_s += [base, base + on_s, base + period_s / 2.0,
+                              base + period_s / 2.0 + on_s]
+                signs += [1.0, -1.0, -1.0, 1.0]
+            # Simulation evaluates one time vector per receiver, so fold every
+            # shifted copy of the gates into one sorted vector and remember how
+            # to unsort back to (n_terms, n_gates) for the signed combination.
+            shifted = self.gate_times_s[None, :] + np.asarray(offsets_s)[:, None]
+            flat = shifted.ravel()
+            order = np.argsort(flat)
+            self._sim_times_s = flat[order]
+            self._unsort = np.argsort(order)
+            self._term_signs = np.asarray(signs)
+        else:
+            self._sim_times_s = self.gate_times_s
+
         self._sim_cache: dict[float, tdem.Simulation1DLayered] = {}
 
     def _build_simulation(self, bird_height_m: float) -> tdem.Simulation1DLayered:
@@ -113,7 +176,7 @@ class TDEMForward:
             # offset for central-loop receivers — exact geometry, no clamp (#6)
             rx_location = np.array([[0.0, 0.0, key + self.rx_dz_m]])
             receiver = tdem.receivers.PointMagneticFluxTimeDerivative(
-                rx_location, times=self.gate_times_s, orientation="z"
+                rx_location, times=self._sim_times_s, orientation="z"
             )
             r = self.tx_loop_radius_m
             source = tdem.sources.CircularLoop(
@@ -127,7 +190,7 @@ class TDEMForward:
         else:  # offset_dipole
             rx_location = np.array([[self.tx_rx_separation_m, 0.0, key + self.rx_dz_m]])
             receiver = tdem.receivers.PointMagneticFluxTimeDerivative(
-                rx_location, times=self.gate_times_s, orientation="z"
+                rx_location, times=self._sim_times_s, orientation="z"
             )
             source = tdem.sources.MagDipole(
                 [receiver],
@@ -166,6 +229,10 @@ class TDEMForward:
         # sigmaMap is ExpMap → model vector is ln(sigma) = -ln(rho)
         model = np.log(1.0 / rho_layers)
         dpred = sim.dpred(model)
+        if self.waveform == "bipolar_square":
+            # signed superposition of the time-shifted step-off responses (#22)
+            per_term = dpred[self._unsort].reshape(-1, len(self.gate_times_s))
+            dpred = self._term_signs @ per_term
         # SimPEG's z-component off-time dB/dt is negative over a conductive
         # earth; operators deliver it positive-decaying. Negate — do NOT
         # abs(): sign-changing transients (IP effects) must keep their fold
@@ -186,6 +253,7 @@ def forward_from_config(config: dict) -> TDEMForward:
     inv = config["inversion"]
     sysc = config["system"]
     thk = layer_thicknesses(inv["depth_min_m"], inv["depth_max_m"], inv["n_layers"])
+    waveform = sysc.get("tx_waveform", "step_off")
     return TDEMForward(
         gate_times_ms=config["gate_times_ms"],
         thicknesses=thk,
@@ -193,4 +261,7 @@ def forward_from_config(config: dict) -> TDEMForward:
         tx_loop_radius_m=sysc.get("tx_loop_radius_m", 13.0),
         tx_rx_separation_m=sysc.get("tx_rx_separation_m", 0.0),
         rx_dz_m=sysc.get("rx_dz_m", 0.0),
+        waveform=waveform,
+        base_frequency_hz=sysc.get("tx_frequency_hz"),
+        on_time_ms=sysc.get("tx_on_time_us", 0.0) / 1000.0,
     )

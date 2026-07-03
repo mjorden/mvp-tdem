@@ -38,9 +38,12 @@ GATE_TIMES_MS = [
 
 # Real SimPEG 1D forward — same physics the inversion uses, so the
 # synthetic survey is a proper end-to-end test of the pipeline.
-# Concentric-loop geometry (VTEM-style, #6).
+# Concentric-loop geometry (VTEM-style, #6); 25 Hz bipolar square wave
+# matching the example.json sidecar (#22).
 _FWD = TDEMForward(GATE_TIMES_MS, layer_thicknesses(0.5, 300, 30),
-                   tx_geometry="concentric_loop", tx_loop_radius_m=13.0)
+                   tx_geometry="concentric_loop", tx_loop_radius_m=13.0,
+                   waveform="bipolar_square", base_frequency_hz=25.0,
+                   on_time_ms=4.0)
 
 
 def sounding_response(rho_layers: np.ndarray, bird_height_m: float) -> np.ndarray:
@@ -99,7 +102,8 @@ def main():
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(out, index=False)
-    print(f"Wrote {len(df)} soundings ({N_LINES} lines × {N_STATIONS} stations) → {out}")
+    # ASCII only — cp1252 consoles on Windows choke on arrows/multiplication signs
+    print(f"Wrote {len(df)} soundings ({N_LINES} lines x {N_STATIONS} stations) -> {out}")
 
 
 if __name__ == "__main__":

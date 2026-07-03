@@ -42,9 +42,9 @@ Gate columns are described, not listed:
 | Key | Example | Notes |
 |-----|---------|-------|
 | `tx_moment_am2` | `420000` | Informational (data are already moment-normalized) |
-| `tx_frequency_hz` | `25` | Base frequency — used to validate gate times against the off-time window |
-| `tx_waveform` | `"bipolar_square"` | Informational in MVP (forward uses step-off) |
-| `tx_on_time_us` | `4000` | On-time, µs — enters the off-time check |
+| `tx_frequency_hz` | `25` | Base frequency — drives the bipolar superposition (#22) and the off-time gate check |
+| `tx_waveform` | `"bipolar_square"` | `bipolar_square` → forward superposes prior half-cycle transients (#22); `step_off` → single ideal turn-off |
+| `tx_on_time_us` | `4000` | On-time, µs — enters the superposition and the off-time check |
 | `rx_coil_area_m2` | `99.7` | Informational |
 | `tx_geometry` | `"concentric_loop"` | `concentric_loop` (VTEM-style, Rx at loop centre) or `offset_dipole` |
 | `tx_loop_radius_m` | `13.0` | `concentric_loop` only |
