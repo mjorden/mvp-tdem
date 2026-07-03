@@ -139,3 +139,51 @@ def test_ground_elevation_computed(fwd):
     result = invert_line(df, _config(), fwd=fwd, verbose=False)
     # ground = GPS elevation - bird height
     assert result.soundings[0].elevation == pytest.approx(1450.0 - BIRD)
+
+
+# ---------------------------------------------------------------------------
+# Occam cooling / regularization (#10, #11, #18)
+# ---------------------------------------------------------------------------
+
+def test_cooling_stops_at_smoothest_fitting_model(fwd):
+    """#10: noisy data should be fit to ~chi_target, not far below (no overfit)."""
+    rng = np.random.default_rng(7)
+    d_true = fwd.predict(np.full(N_LAYERS, 100.0), BIRD)
+    d_obs = d_true * (1 + 0.05 * rng.standard_normal(len(d_true)))
+    rho, chi, ok = invert_sounding(fwd, d_obs, BIRD, rel_error=0.05,
+                                   chi_target=1.0, max_iter=40)
+    # cooling accepts the FIRST (smoothest) stage reaching target — chi should
+    # land near 1, not grossly below (which would mean fitting noise)
+    assert chi <= 1.0
+    assert chi > 0.2, f"chi={chi:.2f} — suspiciously overfit despite cooling"
+
+
+def test_reference_model_decoupled_from_start(fwd):
+    """#18: rho_ref pins the damping target; warm start must not change the objective."""
+    d_obs = fwd.predict(np.full(N_LAYERS, 100.0), BIRD)
+    weird_start = np.full(N_LAYERS, 3000.0)
+    rho_a, chi_a, _ = invert_sounding(fwd, d_obs, BIRD,
+                                      rho_initial=weird_start, rho_ref=100.0,
+                                      max_iter=40)
+    rho_b, chi_b, _ = invert_sounding(fwd, d_obs, BIRD,
+                                      rho_initial=100.0, rho_ref=100.0,
+                                      max_iter=40)
+    # same objective → both should fit; recovered models comparable in the
+    # well-resolved shallow half
+    assert chi_a <= 1.0 and chi_b <= 1.0
+    gm_a = 10 ** np.mean(np.log10(rho_a[:4]))
+    gm_b = 10 ** np.mean(np.log10(rho_b[:4]))
+    assert gm_a / gm_b < 3 and gm_b / gm_a < 3
+
+
+def test_stale_warm_start_reset(fwd):
+    """#18: after a long QC gap, warm start resets to the cold model."""
+    rhos = [5.0] * 2 + [200.0] * 8
+    df = _make_line_df(fwd, rhos)
+    mask = [False, False] + [True] * 6 + [False, False]   # 6-sounding gap
+    df["sounding_mask"] = mask
+    result = invert_line(df, _config(), fwd=fwd, verbose=False)
+    # soundings after the gap must invert fine (started cold, not from the conductor)
+    post_gap = [s for s in result.soundings if s.fiducial >= 1008]
+    assert len(post_gap) == 2
+    assert all(s.chi <= 2.0 for s in post_gap)

@@ -57,6 +57,7 @@
     "alpha_z":         1.0,
     "max_iter":        20,
     "rel_error":       0.05,
+    "chi_target":      1.0,
     "use_noise_floor": true
   }
 }
