@@ -2,7 +2,7 @@
 Generate a synthetic helicopter TDEM survey CSV for testing.
 
 Simulates 3 flight lines (N-S traverses) with a conductive body in the centre.
-Output columns match the 'bracket' convention: SFz[0]..SFz[29].
+Output columns match the 'bracket' convention: SFz[0]..SFz[19].
 
 Usage
 -----
@@ -21,25 +21,26 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from tdem.forward import TDEMForward, layer_thicknesses
 
 
-N_GATES    = 30
+N_GATES    = 20
 N_LINES    = 3
 N_STATIONS = 80   # soundings per line
 LINE_SPACING_M = 200
 STATION_SPACING_M = 50
 
+# 20 gates, all inside the 16 ms off-time of a 25 Hz / 4 ms-on-time
+# bipolar waveform (#1) — matches configs/example.json
 GATE_TIMES_MS = [
     0.0084, 0.0124, 0.0184, 0.0272, 0.0404, 0.0600, 0.0888,
     0.1312, 0.1944, 0.2880, 0.4268, 0.6320, 0.9360, 1.3860,
-    2.0524, 3.0400, 4.5012, 6.6680, 9.8760, 14.624, 21.664,
-    32.076, 47.520, 70.380, 104.23, 154.44, 228.76, 338.80,
-    501.96, 743.40
+    2.0524, 3.0400, 4.5012, 6.6680, 9.8760, 14.624
 ]
 
 
 # Real SimPEG 1D forward — same physics the inversion uses, so the
 # synthetic survey is a proper end-to-end test of the pipeline.
+# Concentric-loop geometry (VTEM-style, #6).
 _FWD = TDEMForward(GATE_TIMES_MS, layer_thicknesses(0.5, 300, 30),
-                   tx_rx_separation_m=12.4)
+                   tx_geometry="concentric_loop", tx_loop_radius_m=13.0)
 
 
 def sounding_response(rho_layers: np.ndarray, bird_height_m: float) -> np.ndarray:

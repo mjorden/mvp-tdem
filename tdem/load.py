@@ -151,6 +151,22 @@ def _validate(df: pd.DataFrame, config: dict) -> pd.DataFrame:
             "These must match."
         )
 
+    # Gate times must fit inside the waveform off-time (#1): a bipolar square
+    # wave at base frequency f has a half-period of 1/(2f); subtracting the
+    # on-time leaves the measurable off-time window.
+    sysc = config.get("system", {})
+    f    = sysc.get("tx_frequency_hz")
+    if f and gate_times:
+        on_time_ms  = sysc.get("tx_on_time_us", 0) / 1000.0
+        off_time_ms = 1000.0 / (2.0 * f) - on_time_ms
+        if max(gate_times) >= off_time_ms:
+            raise ValueError(
+                f"Latest gate ({max(gate_times)} ms) is outside the off-time window "
+                f"({off_time_ms:.3f} ms for tx_frequency_hz={f}, "
+                f"on_time={on_time_ms} ms). These gates are physically impossible — "
+                "fix gate_times_ms or tx_frequency_hz in the sidecar."
+            )
+
     return df
 
 

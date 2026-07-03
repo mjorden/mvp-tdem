@@ -25,6 +25,12 @@ def test_layer_thicknesses_count():
     assert len(thk) == 29  # n_layers - 1; last layer is half-space
 
 
+def test_layer_thicknesses_reach_depth_max():
+    """#9: the basal half-space must start exactly at depth_max."""
+    thk = layer_thicknesses(0.5, 300, 30)
+    assert np.isclose(thk.sum(), 300.0)
+
+
 def test_layer_thicknesses_positive_and_increasing():
     thk = layer_thicknesses(0.5, 300, 30)
     assert np.all(thk > 0)
@@ -51,7 +57,35 @@ def test_layer_depths_starts_at_zero():
 @pytest.fixture(scope="module")
 def fwd():
     thk = layer_thicknesses(1.0, 200, 12)
-    return TDEMForward(GATE_TIMES_MS, thk)
+    return TDEMForward(GATE_TIMES_MS, thk)  # default: concentric_loop, r=13 m
+
+
+def test_concentric_vs_offset_dipole_differ_early_time():
+    """#6: finite-loop and point-dipole geometries must differ at early gates."""
+    thk = layer_thicknesses(1.0, 200, 12)
+    rho = np.full(12, 100.0)
+    d_loop = TDEMForward(GATE_TIMES_MS, thk, tx_geometry="concentric_loop",
+                         tx_loop_radius_m=13.0).predict(rho, 35.0)
+    d_dip = TDEMForward(GATE_TIMES_MS, thk, tx_geometry="offset_dipole",
+                        tx_rx_separation_m=13.0).predict(rho, 35.0)
+    # both positive-decaying, but not identical (esp. early time)
+    assert np.all(d_loop > 0) and np.all(d_dip > 0)
+    assert not np.allclose(d_loop[:3], d_dip[:3], rtol=1e-3, atol=0.0)
+
+
+def test_offset_dipole_zero_separation_warns_and_clamps():
+    """#21: silent clamp is now a warning."""
+    thk = layer_thicknesses(1.0, 200, 8)
+    with pytest.warns(UserWarning, match="clamped to 1 m"):
+        f = TDEMForward(GATE_TIMES_MS, thk, tx_geometry="offset_dipole",
+                        tx_rx_separation_m=0.0)
+    assert f.tx_rx_separation_m == 1.0
+
+
+def test_unknown_geometry_raises():
+    thk = layer_thicknesses(1.0, 200, 8)
+    with pytest.raises(ValueError, match="tx_geometry"):
+        TDEMForward(GATE_TIMES_MS, thk, tx_geometry="triangle")
 
 
 def test_predict_shape_and_positive(fwd):
@@ -114,4 +148,5 @@ def test_forward_from_config():
     fwd = forward_from_config(config)
     assert fwd.n_layers == config["inversion"]["n_layers"]
     assert len(fwd.gate_times_s) == len(config["gate_times_ms"])
-    assert fwd.tx_rx_separation_m == config["system"]["tx_rx_separation_m"]
+    assert fwd.tx_geometry == config["system"]["tx_geometry"]
+    assert fwd.tx_loop_radius_m == config["system"]["tx_loop_radius_m"]

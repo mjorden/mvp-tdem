@@ -19,7 +19,7 @@
     "latitude":   "Latitude",
     "longitude":  "Longitude",
     "sfz_prefix": "SFz",
-    "sfz_n":      30,
+    "sfz_n":      20,
     "sfz_format": "bracket",
     "_sfz_format_note": "'bracket' → SFz[0]..SFz[29]; 'underscore' → SFz_00..SFz_29; 'zero_padded' → SFz00..SFz29"
   },
@@ -30,20 +30,21 @@
     "tx_waveform":              "bipolar_square",
     "tx_on_time_us":            4000,
     "rx_coil_area_m2":          99.7,
-    "tx_rx_separation_m":       12.4,
+    "tx_geometry":              "concentric_loop",
+    "tx_loop_radius_m":         13.0,
+    "rx_dz_m":                  0.0,
     "rx_orientation":           "Z",
     "system_noise_floor":       1e-12,
+    "_geometry_note":           "concentric_loop (VTEM-style, Rx at loop centre) or offset_dipole (+ tx_rx_separation_m)",
     "_noise_units":             "V/(A·m⁴) — same units as gate data; per-gate floor when std columns absent"
   },
 
   "gate_times_ms": [
     0.0084, 0.0124, 0.0184, 0.0272, 0.0404, 0.0600, 0.0888,
     0.1312, 0.1944, 0.2880, 0.4268, 0.6320, 0.9360, 1.3860,
-    2.0524, 3.0400, 4.5012, 6.6680, 9.8760, 14.624, 21.664,
-    32.076, 47.520, 70.380, 104.23, 154.44, 228.76, 338.80,
-    501.96, 743.40
+    2.0524, 3.0400, 4.5012, 6.6680, 9.8760, 14.624
   ],
-  "_gate_times_note": "Center of each gate window in milliseconds after waveform turnoff. Length must equal sfz_n.",
+  "_gate_times_note": "Gate-centre times in ms after turnoff. Length must equal sfz_n, and the last gate must fit inside the off-time: 1/(2·f) − on_time = 16 ms at 25 Hz / 4 ms on-time.",
 
   "inversion": {
     "n_layers":        30,

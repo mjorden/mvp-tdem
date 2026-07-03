@@ -35,12 +35,13 @@ def layer_thicknesses(depth_min: float, depth_max: float, n_layers: int) -> np.n
 
     Returns (n_layers - 1) thicknesses — SimPEG's convention is that the
     last layer is an infinite half-space, so a model of n_layers
-    resistivities pairs with n_layers - 1 thicknesses.
+    resistivities pairs with n_layers - 1 thicknesses. The deepest interface
+    lands exactly on depth_max, i.e. the half-space starts at depth_max (#9).
     """
     if n_layers < 2:
         raise ValueError("n_layers must be >= 2 (layers + basal half-space)")
-    interfaces = np.logspace(np.log10(depth_min), np.log10(depth_max), n_layers)
-    return np.diff(np.concatenate([[0.0], interfaces]))[: n_layers - 1]
+    interfaces = np.logspace(np.log10(depth_min), np.log10(depth_max), n_layers - 1)
+    return np.diff(np.concatenate([[0.0], interfaces]))
 
 
 def layer_depths(thicknesses: np.ndarray) -> np.ndarray:
@@ -63,22 +64,42 @@ class TDEMForward:
     ----------
     gate_times_ms : gate-center times after turnoff, in milliseconds
     thicknesses   : layer thicknesses in m (from layer_thicknesses())
-    tx_rx_separation_m : horizontal Tx–Rx offset (0 for concentric systems)
+    tx_geometry   : "concentric_loop" (VTEM-style: Rx at centre of a circular
+                    Tx loop of tx_loop_radius_m) or "offset_dipole" (point
+                    dipole Tx with a horizontal Rx offset, rx_dz vertical offset)
+    tx_loop_radius_m   : Tx loop radius, concentric_loop only (#6)
+    tx_rx_separation_m : horizontal Tx–Rx offset, offset_dipole only
+    rx_dz_m            : Rx vertical offset above the Tx plane (e.g. SkyTEM ~2 m)
     """
 
     def __init__(
         self,
         gate_times_ms: np.ndarray | list[float],
         thicknesses: np.ndarray,
+        tx_geometry: str = "concentric_loop",
+        tx_loop_radius_m: float = 13.0,
         tx_rx_separation_m: float = 0.0,
+        rx_dz_m: float = 0.0,
     ):
         self.gate_times_s = np.asarray(gate_times_ms, dtype=float) * 1e-3
         self.thicknesses = np.asarray(thicknesses, dtype=float)
         self.n_layers = len(self.thicknesses) + 1
-        # SimPEG's 1D Hankel transform divides by horizontal Tx–Rx offset,
-        # so a perfectly coincident geometry (offset=0) produces NaNs. Clamp
-        # to 1 m — negligible vs. the system footprint (tens to hundreds of m).
-        self.tx_rx_separation_m = max(float(tx_rx_separation_m), 1.0)
+        if tx_geometry not in ("concentric_loop", "offset_dipole"):
+            raise ValueError(f"Unknown tx_geometry: {tx_geometry!r}")
+        self.tx_geometry = tx_geometry
+        self.tx_loop_radius_m = float(tx_loop_radius_m)
+        self.rx_dz_m = float(rx_dz_m)
+        if tx_geometry == "offset_dipole" and tx_rx_separation_m < 1.0:
+            # SimPEG's 1D Hankel transform divides by horizontal Tx–Rx offset;
+            # a coincident point dipole (offset=0) produces NaNs. For truly
+            # concentric systems use tx_geometry="concentric_loop" instead (#21).
+            import warnings
+            warnings.warn(
+                f"offset_dipole with separation {tx_rx_separation_m} m clamped to 1 m; "
+                "use tx_geometry='concentric_loop' for concentric systems"
+            )
+            tx_rx_separation_m = 1.0
+        self.tx_rx_separation_m = float(tx_rx_separation_m)
         self._sim_cache: dict[float, tdem.Simulation1DLayered] = {}
 
     def _build_simulation(self, bird_height_m: float) -> tdem.Simulation1DLayered:
@@ -87,17 +108,34 @@ class TDEMForward:
         if key in self._sim_cache:
             return self._sim_cache[key]
 
-        rx_location = np.array([[self.tx_rx_separation_m, 0.0, key]])
-        receiver = tdem.receivers.PointMagneticFluxTimeDerivative(
-            rx_location, times=self.gate_times_s, orientation="z"
-        )
-        source = tdem.sources.MagDipole(
-            [receiver],
-            location=np.array([0.0, 0.0, key]),
-            orientation="z",
-            moment=1.0,  # unit moment → output is moment-normalized (V/(A·m⁴))
-            waveform=tdem.sources.StepOffWaveform(),
-        )
+        if self.tx_geometry == "concentric_loop":
+            # Rx at loop centre; SimPEG uses the loop radius as the Hankel
+            # offset for central-loop receivers — exact geometry, no clamp (#6)
+            rx_location = np.array([[0.0, 0.0, key + self.rx_dz_m]])
+            receiver = tdem.receivers.PointMagneticFluxTimeDerivative(
+                rx_location, times=self.gate_times_s, orientation="z"
+            )
+            r = self.tx_loop_radius_m
+            source = tdem.sources.CircularLoop(
+                [receiver],
+                location=np.array([0.0, 0.0, key]),
+                orientation="z",
+                radius=r,
+                current=1.0 / (np.pi * r ** 2),  # moment = I·πr² = 1 → output in V/(A·m⁴)
+                waveform=tdem.sources.StepOffWaveform(),
+            )
+        else:  # offset_dipole
+            rx_location = np.array([[self.tx_rx_separation_m, 0.0, key + self.rx_dz_m]])
+            receiver = tdem.receivers.PointMagneticFluxTimeDerivative(
+                rx_location, times=self.gate_times_s, orientation="z"
+            )
+            source = tdem.sources.MagDipole(
+                [receiver],
+                location=np.array([0.0, 0.0, key]),
+                orientation="z",
+                moment=1.0,  # unit moment → output is moment-normalized (V/(A·m⁴))
+                waveform=tdem.sources.StepOffWaveform(),
+            )
         survey = tdem.Survey([source])
 
         sim = tdem.Simulation1DLayered(
@@ -128,7 +166,11 @@ class TDEMForward:
         # sigmaMap is ExpMap → model vector is ln(sigma) = -ln(rho)
         model = np.log(1.0 / rho_layers)
         dpred = sim.dpred(model)
-        return np.abs(dpred)
+        # SimPEG's z-component off-time dB/dt is negative over a conductive
+        # earth; operators deliver it positive-decaying. Negate — do NOT
+        # abs(): sign-changing transients (IP effects) must keep their fold
+        # so the Jacobian stays differentiable (#5).
+        return -dpred
 
     def predict_log(self, log10_rho: np.ndarray, bird_height_m: float) -> np.ndarray:
         """predict() but taking log10(resistivity) — the inversion's parameterization."""
@@ -142,9 +184,13 @@ class TDEMForward:
 def forward_from_config(config: dict) -> TDEMForward:
     """Build a TDEMForward from a survey sidecar config dict (see configs/example.json)."""
     inv = config["inversion"]
+    sysc = config["system"]
     thk = layer_thicknesses(inv["depth_min_m"], inv["depth_max_m"], inv["n_layers"])
     return TDEMForward(
         gate_times_ms=config["gate_times_ms"],
         thicknesses=thk,
-        tx_rx_separation_m=config["system"].get("tx_rx_separation_m", 0.0),
+        tx_geometry=sysc.get("tx_geometry", "concentric_loop"),
+        tx_loop_radius_m=sysc.get("tx_loop_radius_m", 13.0),
+        tx_rx_separation_m=sysc.get("tx_rx_separation_m", 0.0),
+        rx_dz_m=sysc.get("rx_dz_m", 0.0),
     )
