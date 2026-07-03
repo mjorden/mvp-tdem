@@ -73,14 +73,22 @@ mvp-tdem/
 │   ├── qc.py            # 6 QC checks → _qc_* flags; nothing dropped, callers decide
 │   ├── forward.py       # SimPEG 1D TDEM forward wrapper (TDEMForward, per-height sim cache)
 │   ├── invert.py        # Occam-style per-sounding inversion + along-line warm-start stitching
-│   └── visualize.py     # plot_section / plot_decays / plot_sounding_fit (matplotlib, Agg)
+│   ├── visualize.py     # plot_section / plot_decays / plot_sounding_fit (matplotlib, Agg)
+│   └── ingest/          # Raw instrument logs → canonical CSV + sidecar (docs/RAW_INGEST.md):
+│                        #   readers → timesync → stack → calibrate → merge → geometry → emit
 ├── configs/
 │   ├── example.json     # Survey sidecar: column map, system params, gate times, inversion params
+│   ├── instrument.yaml  # Own-instrument hardware config (ingest generates sidecars from it)
+│   ├── survey_example.yaml  # Per-survey ingest + inversion params
 │   └── README.md        # Full sidecar schema reference
+├── docs/
+│   └── RAW_INGEST.md    # Raw-ingest design and v0 log formats
 ├── examples/            # Runnable library-API walkthroughs (see examples/README.md)
 ├── scripts/
 │   ├── process_line.py  # CLI: load → QC → invert → plot, one line or --all-lines
-│   └── generate_synthetic.py  # Synthetic 3-line survey via the real SimPEG forward
+│   ├── ingest_flight.py # CLI: raw flight dir(s) → survey.csv + generated sidecar
+│   ├── generate_synthetic.py  # Synthetic 3-line survey via the real SimPEG forward
+│   └── generate_raw_flight.py # Synthetic RAW flight dir for exercising ingest
 ├── data/
 │   └── synthetic_survey.csv   # Checked-in synthetic survey (see data/README.md)
 ├── tests/               # pytest suite (load / qc / forward / invert)
@@ -95,6 +103,16 @@ Two files per survey:
 2. **JSON sidecar** — everything the CSV doesn't carry: column name mapping, system parameters (geometry, waveform, noise floor), gate-centre times, and inversion defaults. Schema documented in [configs/README.md](configs/README.md).
 
 Three gate-column naming conventions are supported via `column_map.sfz_format`: `bracket` (`SFz[0]`), `underscore` (`SFz_00`), `zero_padded` (`SFz00`).
+
+### Raw instrument logs
+
+For our own instrument the CSV + sidecar pair is *generated*, not hand-written: `scripts/ingest_flight.py` turns a flight directory of raw logger streams (EM half-cycles, GPS, altimeter, Tx current, operator line log) into the canonical pair — clock sync, polarity stacking, calibration to V/(A·m⁴), nav merge, projection, and line assignment included. Design and v0 log formats: [docs/RAW_INGEST.md](docs/RAW_INGEST.md).
+
+```bash
+python scripts/generate_raw_flight.py --out data/flights/F_SYNTH_01   # synthetic raw flight
+python scripts/ingest_flight.py --flight data/flights/F_SYNTH_01 \
+    --instrument configs/instrument.yaml --survey configs/survey_example.yaml
+```
 
 ## Data conventions
 

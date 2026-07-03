@@ -1,4 +1,0 @@
-# mvp-tdem synthetic operator line log
-line,t_start_utc,t_end_utc
-1000,1750000000.000,1750000010.000
-1010,1750000022.000,1750000032.000

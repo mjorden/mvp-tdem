@@ -1,6 +1,8 @@
 # Raw ingest design — instrument logs → canonical survey CSV + sidecar
 
-**Status:** design sketch, not implemented.
+**Status:** Phase 1 implemented (`tdem/ingest/`, `scripts/ingest_flight.py`,
+`scripts/generate_raw_flight.py`); v0 log formats documented in
+`tdem/ingest/readers.py`. Phase 2 and the open questions below remain.
 **Scope:** the stage *upstream* of `tdem/load.py`. Everything downstream
 (load → qc → invert → visualize) already works against a canonical
 deliverable: a flat CSV (one row per sounding, gated `SFz[i]` columns in
