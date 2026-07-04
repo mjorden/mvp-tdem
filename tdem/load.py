@@ -61,6 +61,11 @@ def gate_columns(df: pd.DataFrame) -> list[str]:
     return sorted(c for c in df.columns if re.match(r"^sfz_\d+$", c))
 
 
+def gate_std_columns(df: pd.DataFrame) -> list[str]:
+    """Return ordered list of sfz_std_* column names present in df (may be empty)."""
+    return sorted(c for c in df.columns if re.match(r"^sfz_std_\d+$", c))
+
+
 def gate_array(df: pd.DataFrame) -> np.ndarray:
     """Return (n_soundings, n_gates) array of EM response values [V/(A·m⁴)]."""
     return df[gate_columns(df)].to_numpy(dtype=float)
@@ -191,6 +196,14 @@ def _apply_column_map(raw: pd.DataFrame, col_map: dict) -> pd.DataFrame:
 
     # drop original gate columns now duplicated by the sfz_* ones
     df = df.drop(columns=[c for c in gate_raw if c in df.columns])
+
+    # optionally load per-gate standard-deviation columns (SFz_std[i]) if present;
+    # emit always writes them in bracket format using "{prefix}_std[i]"
+    std_raw = _gate_column_names(f"{prefix}_std", n, "bracket")
+    if all(c in raw.columns for c in std_raw):
+        for i, raw_col in enumerate(std_raw):
+            df[f"sfz_std_{i:02d}"] = pd.to_numeric(raw[raw_col], errors="coerce")
+        df = df.drop(columns=[c for c in std_raw if c in df.columns])
 
     return df
 

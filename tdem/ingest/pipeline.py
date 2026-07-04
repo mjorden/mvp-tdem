@@ -38,9 +38,12 @@ def ingest_flight(flight_dir: str | Path, instrument: dict, survey_cfg: dict) ->
     trim_frac = ing.get("trim_frac", 0.1)
     max_gap_s = ing.get("max_gap_s", 2.0)
 
+    import warnings
+
     paths = readers.discover_flight(flight_dir)
 
-    clock = fit_clock(readers.read_sync(paths["sync"]),
+    sync_df = readers.read_sync(paths["sync"])
+    clock = fit_clock(sync_df,
                       max_residual_ms=instrument.get("clock", {}).get("max_residual_ms", 1.0))
 
     em  = apply_clock(readers.read_em(paths["em"]), clock)
@@ -49,6 +52,19 @@ def ingest_flight(flight_dir: str | Path, instrument: dict, survey_cfg: dict) ->
     txcur = (apply_clock(readers.read_txcur(paths["txcur"]), clock)
              if paths["txcur"] else None)
     lines_df = readers.read_lines(paths["lines"]) if paths["lines"] else None
+
+    # GPS-vs-UTC leap-second diagnostic (#64): if the sync log and GPS position
+    # log disagree by ~18–19 s their time standards differ (GPS ≠ UTC).
+    if "t_utc" in gps.columns:
+        dt = sync_df["t_utc"].median() - gps["t_utc"].median()
+        if 14.0 <= abs(dt) <= 22.0:
+            warnings.warn(
+                f"[timesync] Sync stream and GPS position stream differ by "
+                f"{dt:+.1f} s — possible GPS/UTC leap-second mismatch "
+                f"(current offset is ~18 s).  Verify both streams use the "
+                "same time standard or ~540 m position errors will result.",
+                stacklevel=2,
+            )
 
     df = stack_and_locate(em, gps, alt, txcur, lines_df, instrument, survey_cfg,
                           n_stack=n_stack, trim_frac=trim_frac, max_gap_s=max_gap_s)
@@ -59,9 +75,12 @@ def ingest_flight(flight_dir: str | Path, instrument: dict, survey_cfg: dict) ->
         "n_soundings": len(df),
         "n_stack": n_stack,
         "trim_frac": trim_frac,
-        "time_sync": {"mode": "gps_messages", "rate": clock.rate,
-                      "max_residual_ms": clock.max_residual_s * 1000,
-                      "n_pairs": clock.n_pairs},
+        "time_sync": {
+            "mode": "gps_messages",
+            "model": "piecewise_linear",
+            "max_residual_ms": clock.max_residual_s * 1000,
+            "n_pairs": clock.n_pairs,
+        },
         "moment": df.attrs["moment_mode"],
         "line_assignment": "operator_log" if lines_df is not None else "heading_auto",
     }

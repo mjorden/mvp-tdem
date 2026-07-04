@@ -75,18 +75,44 @@ def _lines_from_heading(out, win, turn_threshold_deg, min_line_soundings):
     (smoothed over ±win soundings) stays close to the segment's running
     heading. Runs shorter than min_line_soundings are treated as turns.
     Lines are numbered 1000, 1010, 1020, ... in flight order.
+
+    NaN positions (nav gaps) are treated as mandatory turn boundaries so that
+    np.unwrap's cumulative propagation never poisons headings downstream of a
+    gap.  Each contiguous block of valid (non-NaN) positions is processed
+    independently.  Edge-replicated padding is used instead of zero-padding so
+    the first/last `win` soundings of each block don't get spurious turn flags.
     """
-    dx = np.gradient(out["easting"].to_numpy())
-    dy = np.gradient(out["northing"].to_numpy())
-    heading = np.degrees(np.arctan2(dx, dy))  # deg from north, ±180
+    east  = out["easting"].to_numpy()
+    north = out["northing"].to_numpy()
+    n     = len(east)
 
-    # unwrap so smoothing/differencing doesn't jump at ±180
-    heading = np.degrees(np.unwrap(np.radians(heading)))
-    kernel  = np.ones(2 * win + 1) / (2 * win + 1)
-    smooth  = np.convolve(heading, kernel, mode="same")
-    turning = np.abs(np.gradient(smooth)) > turn_threshold_deg / (2 * win + 1)
+    valid = np.isfinite(east) & np.isfinite(north)
+    # NaN positions are always turns; valid ones are filled in per block below
+    turning = ~valid.copy()
 
-    line = np.full(len(out), -1, dtype=int)
+    # find contiguous valid blocks — process each independently
+    padded_v = np.concatenate([[False], valid, [False]])
+    dv = np.diff(padded_v.astype(int))
+    block_starts = np.where(dv == 1)[0]
+    block_ends   = np.where(dv == -1)[0]
+
+    thresh = turn_threshold_deg / (2 * win + 1)
+    kernel = np.ones(2 * win + 1) / (2 * win + 1)
+
+    for s, e in zip(block_starts, block_ends):
+        if e - s < 2:
+            continue
+        dx = np.gradient(east[s:e])
+        dy = np.gradient(north[s:e])
+        h  = np.degrees(np.unwrap(np.radians(np.degrees(np.arctan2(dx, dy)))))
+        # edge-replicated padding avoids zero-pad artifacts at block boundaries
+        smooth   = np.convolve(np.pad(h, win, mode="edge"), kernel, mode="valid")
+        seg_turn = np.abs(np.gradient(smooth)) > thresh
+        # gap boundaries are always turns — don't let a block merge across a gap
+        seg_turn[0] = seg_turn[-1] = True
+        turning[s:e] = seg_turn
+
+    line = np.full(n, -1, dtype=int)
     line_id, start = 1000, None
     for i, is_turn in enumerate(list(turning) + [True]):  # sentinel closes last run
         if not is_turn and start is None:

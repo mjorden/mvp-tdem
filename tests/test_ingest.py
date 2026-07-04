@@ -26,10 +26,11 @@ def _sync_df(offset=T0, rate=1 + 2e-6, n=120, jitter=0.0, seed=0):
 
 def test_fit_clock_recovers_offset_and_drift():
     m = fit_clock(_sync_df())
-    # 0.1 ms on the offset: an order below the residual spec, and above
-    # float64 quantization at unix-epoch magnitudes
-    assert m.offset_s == pytest.approx(T0, abs=1e-4)
-    assert m.rate == pytest.approx(1 + 2e-6, abs=1e-9)
+    # piecewise model passes through knots; verify to_utc is accurate within
+    # the sync range (sync df has t_rx in 500..619 with rate 1+2e-6)
+    t_test = np.array([510.0, 560.0, 610.0])
+    expected = T0 + (1 + 2e-6) * t_test
+    assert np.allclose(m.to_utc(t_test), expected, atol=1e-6)
 
 
 def test_fit_clock_tolerates_jitter_within_spec():
@@ -37,10 +38,21 @@ def test_fit_clock_tolerates_jitter_within_spec():
     assert m.max_residual_s < 1e-3
 
 
-def test_fit_clock_rejects_bad_sync_stream():
+def test_fit_clock_rejects_single_outlier_transparently():
+    """A single garbled message must be silently rejected, not abort (#64)."""
+    import warnings
     df = _sync_df()
-    df.loc[50, "t_utc"] += 0.5  # a garbled time message
-    with pytest.raises(ValueError, match="residual"):
+    df.loc[50, "t_utc"] += 0.5  # one garbled message among 120 good pairs
+    with warnings.catch_warnings(record=True):
+        m = fit_clock(df)  # must NOT raise
+    assert m.n_pairs == 119   # one pair rejected
+
+
+def test_fit_clock_rejects_bad_sync_stream():
+    """Too many outliers (> default 20%) must still error (#64)."""
+    df = _sync_df()
+    df.loc[30:60, "t_utc"] += 0.5  # 31/120 ≈ 26% garbled
+    with pytest.raises(ValueError, match="outlier"):
         fit_clock(df)
 
 
@@ -50,9 +62,12 @@ def test_fit_clock_needs_two_pairs():
 
 
 def test_apply_clock():
-    m = ClockModel(offset_s=T0, rate=1.0, max_residual_s=0, n_pairs=2)
+    import numpy as np
+    t_rx = np.array([0.0, 100.0])
+    m = ClockModel(t_rx_knots=t_rx, t_utc_knots=T0 + t_rx,
+                   max_residual_s=0.0, n_pairs=2)
     out = apply_clock(pd.DataFrame({"t_rx": [1.0, 2.0]}), m)
-    assert list(out["t_utc"]) == [T0 + 1.0, T0 + 2.0]
+    assert out["t_utc"].tolist() == pytest.approx([T0 + 1.0, T0 + 2.0])
 
 
 # ---------------------------------------------------------------------------
