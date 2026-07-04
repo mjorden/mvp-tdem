@@ -70,6 +70,11 @@ class TDEMForward:
     tx_loop_radius_m   : Tx loop radius, concentric_loop only (#6)
     tx_rx_separation_m : horizontal Tx–Rx offset, offset_dipole only
     rx_dz_m            : Rx vertical offset above the Tx plane (e.g. SkyTEM ~2 m)
+    time_filter        : SimPEG cosine/sine DLF filter (#63). Default is the
+                         601-pt Key filter: benchmarked ≤0.11% error against
+                         the Ward & Hohmann analytic half-space at 10–1000 Ω·m,
+                         vs 2.0% for SimPEG's 81-pt default and 8.7% for the
+                         201-pt filter (which degrades at high rho).
     """
 
     def __init__(
@@ -80,6 +85,7 @@ class TDEMForward:
         tx_loop_radius_m: float = 13.0,
         tx_rx_separation_m: float = 0.0,
         rx_dz_m: float = 0.0,
+        time_filter: str = "key_601_2009",
     ):
         self.gate_times_s = np.asarray(gate_times_ms, dtype=float) * 1e-3
         self.thicknesses = np.asarray(thicknesses, dtype=float)
@@ -100,6 +106,7 @@ class TDEMForward:
             )
             tx_rx_separation_m = 1.0
         self.tx_rx_separation_m = float(tx_rx_separation_m)
+        self.time_filter = time_filter
         self._sim_cache: dict[float, tdem.Simulation1DLayered] = {}
 
     def _build_simulation(self, bird_height_m: float) -> tdem.Simulation1DLayered:
@@ -142,6 +149,7 @@ class TDEMForward:
             survey=survey,
             thicknesses=self.thicknesses,
             sigmaMap=maps.ExpMap(nP=self.n_layers),
+            time_filter=self.time_filter,
         )
         self._sim_cache[key] = sim
         return sim
@@ -193,4 +201,5 @@ def forward_from_config(config: dict) -> TDEMForward:
         tx_loop_radius_m=sysc.get("tx_loop_radius_m", 13.0),
         tx_rx_separation_m=sysc.get("tx_rx_separation_m", 0.0),
         rx_dz_m=sysc.get("rx_dz_m", 0.0),
+        time_filter=sysc.get("time_filter", "key_601_2009"),
     )

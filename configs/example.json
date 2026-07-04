@@ -47,9 +47,10 @@
   "_gate_times_note": "Gate-centre times in ms after turnoff. Length must equal sfz_n, and the last gate must fit inside the off-time: 1/(2·f) − on_time = 16 ms at 25 Hz / 4 ms on-time.",
 
   "inversion": {
-    "n_layers":        30,
+    "n_layers":        36,
     "depth_min_m":     0.5,
-    "depth_max_m":     300,
+    "depth_max_m":     600,
+    "_mesh_note":      "depth_max ~1.5x estimated DOI (#63): diffusion depth at the 14.6 ms gate is ~480 m even at 10 ohm-m, so a 300 m mesh aliased the last ~5 gates into the basal half-space. 36 layers keeps ~11 interfaces/decade.",
     "rho_initial":     100,
     "rho_min":         1,
     "rho_max":         10000,

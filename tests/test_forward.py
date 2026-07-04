@@ -199,11 +199,11 @@ def bench_fwd():
                        tx_loop_radius_m=13.0)
 
 
-# Measured agreement (SimPEG 0.25.2, default 81-pt time filter): 0.24% at
-# 10 ohm-m, 1.4% at 100, 2.0% at 1000, drift concentrated at late time /
-# high rho — consistent with DLF time-filter error (#63). Tolerances leave
-# modest headroom; tightening them further requires the 201-pt filter.
-@pytest.mark.parametrize("rho,rtol", [(10.0, 0.005), (100.0, 0.02), (1000.0, 0.03)])
+# Measured agreement (SimPEG 0.25.2, key_601_2009 time filter, #63):
+# <0.01% at 10 and 100 ohm-m, 0.11% at 1000 ohm-m (last gate). For reference,
+# the 81-pt SimPEG default reached 2.0% and the 201-pt filter 8.7% at
+# 1000 ohm-m — filter accuracy is not monotone in length at high rho.
+@pytest.mark.parametrize("rho,rtol", [(10.0, 0.002), (100.0, 0.002), (1000.0, 0.005)])
 def test_halfspace_matches_ward_hohmann_exact(bench_fwd, rho, rtol):
     """#54: full-curve amplitude agreement with the exact analytic solution."""
     d = bench_fwd.predict(np.full(bench_fwd.n_layers, rho), bird_height_m=0.0)
@@ -218,7 +218,7 @@ def test_late_time_asymptote_coefficient(bench_fwd):
     rho = 10.0
     d = bench_fwd.predict(np.full(bench_fwd.n_layers, rho), bird_height_m=0.0)
     expected = wh_late_time_asymptote(BENCH_GATES_MS[-1] * 1e-3, rho)
-    np.testing.assert_allclose(d[-1], expected, rtol=0.01)
+    np.testing.assert_allclose(d[-1], expected, rtol=0.002)
 
 
 def test_late_time_slope_is_minus_five_halves(bench_fwd):

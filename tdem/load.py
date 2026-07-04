@@ -236,6 +236,15 @@ def _validate(df: pd.DataFrame, config: dict) -> pd.DataFrame:
                 f"on_time={on_time_ms} ms). These gates are physically impossible — "
                 "fix gate_times_ms or tx_frequency_hz in the sidecar."
             )
+        # #63: the sidecar only carries gate CENTRES; a centre in the last 10%
+        # of the off-time means any realistic gate width integrates into the
+        # next turn-on ramp. Warn — the hard check above uses centres only.
+        if max(gate_times) > 0.9 * off_time_ms:
+            print(
+                f"[load] WARNING: latest gate centre ({max(gate_times)} ms) is within "
+                f"10% of the off-time end ({off_time_ms:.3f} ms) — a finite gate "
+                "window there overlaps the next turn-on ramp."
+            )
 
     return df
 
