@@ -64,6 +64,17 @@ python scripts/generate_synthetic.py --out data/synthetic_survey.csv
 
 For library-API usage (no CLI), see [examples/](examples/).
 
+## Web UI
+
+A Streamlit browser interface wraps the full pipeline — upload a CSV + JSON sidecar, run QC and inversion, and explore results interactively without touching the CLI.
+
+```bash
+pip install -e ".[ui]"
+streamlit run app/streamlit_app.py
+```
+
+Open `http://localhost:8501` in a browser.  The sidebar walks you through upload → QC → inversion; results appear in the **QC**, **Section**, **Decays**, and **Download** tabs.
+
 ## Project layout
 
 ```
