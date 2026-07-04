@@ -230,6 +230,83 @@ def test_late_time_slope_is_minus_five_halves(bench_fwd):
 
 
 # ---------------------------------------------------------------------------
+# Waveform superposition (#22, #52) — bipolar train + finite turn-off ramp
+# ---------------------------------------------------------------------------
+
+WAVE_GATES_MS = np.array([0.0272, 0.0888, 0.288, 0.936, 3.04, 9.876, 14.624])
+
+
+@pytest.fixture(scope="module")
+def wave_thk():
+    return layer_thicknesses(0.5, 300, 12)
+
+
+def test_train_matches_exact_superposition_identity(wave_thk):
+    """#22: with ramp -> 0 the train must reproduce the exact identity
+    d(t) = sum_k [s(t+40k) - s(t+40k+4) - s(t+40k+20) + s(t+40k+24)] (ms),
+    built here from independent step-off predictions at shifted gate times."""
+    rho = np.full(12, 100.0)
+    fwd = TDEMForward(WAVE_GATES_MS, wave_thk, tx_frequency_hz=25.0,
+                      tx_on_time_us=4000.0, tx_ramp_off_us=0.0, n_prior_periods=4)
+    d_train = fwd.predict(rho, 35.0)
+
+    t_s = WAVE_GATES_MS * 1e-3
+    offsets, signs = [], []
+    for k in range(50):  # effectively the infinite sum (terms decay ~t^-5/2)
+        for off_ms, sg in ((40 * k, +1), (40 * k + 4, -1),
+                           (40 * k + 20, -1), (40 * k + 24, +1)):
+            offsets.append(off_ms * 1e-3)
+            signs.append(sg)
+    all_t = np.unique(np.concatenate([t_s + o for o in offsets]))
+    s_ref = TDEMForward(all_t * 1e3, wave_thk).predict(rho, 35.0)
+    lookup = dict(zip(all_t, s_ref))
+    d_exact = sum(sg * np.array([lookup[t + o] for t in t_s])
+                  for o, sg in zip(offsets, signs))
+    # rtol bounded by the n_prior_periods=4 truncation (~2e-4 at the last gate)
+    np.testing.assert_allclose(d_train, d_exact, rtol=5e-4)
+
+
+def test_step_off_overpredicts_late_gates_vs_train(wave_thk):
+    """#22: the single step-off ignores the prior opposite-polarity
+    transitions and over-predicts late gates (2.3x at the 14.6 ms gate
+    over 100 ohm-m); early gates are unaffected."""
+    rho = np.full(12, 100.0)
+    d_step = TDEMForward(WAVE_GATES_MS, wave_thk).predict(rho, 35.0)
+    d_train = TDEMForward(WAVE_GATES_MS, wave_thk, tx_frequency_hz=25.0,
+                          tx_on_time_us=4000.0).predict(rho, 35.0)
+    np.testing.assert_allclose(d_step[:2], d_train[:2], rtol=1e-3)
+    assert d_step[-1] / d_train[-1] > 2.0
+    assert d_step[-2] / d_train[-2] > 1.5
+
+
+def test_ramp_reduces_early_gates(wave_thk):
+    """#52: a finite turn-off ramp averages the steep early-time decay over
+    the ramp window — early gates drop by large factors, late gates by less."""
+    rho = np.full(12, 100.0)
+    kw = dict(tx_frequency_hz=25.0, tx_on_time_us=4000.0)
+    d_ideal = TDEMForward(WAVE_GATES_MS, wave_thk, **kw).predict(rho, 35.0)
+    d_ramp = TDEMForward(WAVE_GATES_MS, wave_thk, tx_ramp_off_us=800.0,
+                         **kw).predict(rho, 35.0)
+    assert np.all(d_ramp < d_ideal)
+    assert d_ramp[0] / d_ideal[0] < 0.2          # first gate: dominated by ramp
+    assert d_ramp[-1] / d_ideal[-1] > 0.5        # late gates: modest reduction
+
+
+def test_train_converged_in_prior_periods(wave_thk):
+    """Truncation check: 4 prior periods is within 0.05% of 8."""
+    rho = np.full(12, 100.0)
+    kw = dict(tx_frequency_hz=25.0, tx_on_time_us=4000.0, tx_ramp_off_us=800.0)
+    d4 = TDEMForward(WAVE_GATES_MS, wave_thk, n_prior_periods=4, **kw).predict(rho, 35.0)
+    d8 = TDEMForward(WAVE_GATES_MS, wave_thk, n_prior_periods=8, **kw).predict(rho, 35.0)
+    np.testing.assert_allclose(d4, d8, rtol=5e-4)
+
+
+def test_frequency_without_on_time_raises(wave_thk):
+    with pytest.raises(ValueError, match="tx_on_time_us"):
+        TDEMForward(WAVE_GATES_MS, wave_thk, tx_frequency_hz=25.0)
+
+
+# ---------------------------------------------------------------------------
 # Config plumbing
 # ---------------------------------------------------------------------------
 
@@ -241,3 +318,57 @@ def test_forward_from_config():
     assert len(fwd.gate_times_s) == len(config["gate_times_ms"])
     assert fwd.tx_geometry == config["system"]["tx_geometry"]
     assert fwd.tx_loop_radius_m == config["system"]["tx_loop_radius_m"]
+    # #22/#52: the declared bipolar_square waveform activates the pulse train
+    assert fwd.tx_frequency_hz == config["system"]["tx_frequency_hz"]
+    assert fwd.tx_ramp_off_s == pytest.approx(config["system"]["tx_ramp_off_us"] * 1e-6)
+    assert fwd._eval_times is not None
+
+
+# ---------------------------------------------------------------------------
+# Analytic Jacobian (#58) — predict_and_jacobian
+# ---------------------------------------------------------------------------
+
+def test_predict_and_jacobian_matches_predict(fwd):
+    """predict_and_jacobian must return the same pred as predict_log."""
+    log10_rho = np.log10(np.full(fwd.n_layers, 100.0))
+    pred_ref = fwd.predict_log(log10_rho, bird_height_m=35.0)
+    pred, J = fwd.predict_and_jacobian(log10_rho, bird_height_m=35.0)
+    np.testing.assert_allclose(pred, pred_ref, rtol=1e-12)
+
+
+def test_predict_and_jacobian_fd_step_off():
+    """#58: analytic J must match finite-difference J for a step-off forward."""
+    thk = layer_thicknesses(1.0, 150, 8)
+    fwd_s = TDEMForward(GATE_TIMES_MS, thk)
+    log10_rho = np.log10(np.full(8, 100.0))
+    pred, J = fwd_s.predict_and_jacobian(log10_rho, bird_height_m=35.0)
+    eps = 1e-4
+    J_fd = np.zeros_like(J)
+    for k in range(8):
+        dm = np.zeros(8)
+        dm[k] = eps
+        J_fd[:, k] = (fwd_s.predict_log(log10_rho + dm, 35.0) - pred) / eps
+    np.testing.assert_allclose(J, J_fd, rtol=1e-3, atol=1e-30)
+
+
+def test_predict_and_jacobian_fd_bipolar():
+    """#58: analytic J must match FD for the bipolar superposition forward."""
+    thk = layer_thicknesses(1.0, 150, 8)
+    fwd_b = TDEMForward(GATE_TIMES_MS, thk, tx_frequency_hz=25.0,
+                        tx_on_time_us=4000.0, n_prior_periods=2)
+    log10_rho = np.log10(np.full(8, 100.0))
+    pred, J = fwd_b.predict_and_jacobian(log10_rho, bird_height_m=35.0)
+    eps = 1e-4
+    J_fd = np.zeros_like(J)
+    for k in range(8):
+        dm = np.zeros(8)
+        dm[k] = eps
+        J_fd[:, k] = (fwd_b.predict_log(log10_rho + dm, 35.0) - pred) / eps
+    np.testing.assert_allclose(J, J_fd, rtol=1e-3, atol=1e-30)
+
+
+def test_predict_and_jacobian_wrong_layer_count():
+    thk = layer_thicknesses(1.0, 150, 8)
+    fwd_s = TDEMForward(GATE_TIMES_MS, thk)
+    with pytest.raises(ValueError, match="log10-rho"):
+        fwd_s.predict_and_jacobian(np.zeros(5), 35.0)

@@ -108,6 +108,7 @@ def build_sidecar(instrument: dict, survey_cfg: dict, n_gates: int, provenance: 
             "tx_frequency_hz":    tx["frequency_hz"],
             "tx_waveform":        tx["waveform"],
             "tx_on_time_us":      tx["on_time_us"],
+            "tx_ramp_off_us":     tx.get("ramp_off_us", 0.0),
             "rx_coil_area_m2":    rx["coil_area_m2"],
             "tx_geometry":        tx["geometry"],
             "tx_loop_radius_m":   tx["loop_radius_m"],

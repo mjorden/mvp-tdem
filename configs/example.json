@@ -29,6 +29,8 @@
     "tx_frequency_hz":          25,
     "tx_waveform":              "bipolar_square",
     "tx_on_time_us":            4000,
+    "tx_ramp_off_us":           800,
+    "_waveform_note":           "on_time includes both ramps; gate times are referenced to the END of the turn-off ramp. bipolar_square + frequency + on_time makes the forward model the full pulse train (#22); ramp_off the finite turn-off (#52).",
     "rx_coil_area_m2":          99.7,
     "tx_geometry":              "concentric_loop",
     "tx_loop_radius_m":         13.0,
@@ -36,7 +38,7 @@
     "rx_orientation":           "Z",
     "system_noise_floor":       1e-12,
     "_geometry_note":           "concentric_loop (VTEM-style, Rx at loop centre) or offset_dipole (+ tx_rx_separation_m)",
-    "_noise_units":             "V/(A·m⁴) — same units as gate data; per-gate floor when std columns absent"
+    "_noise_units":             "V/(A·m⁴) — same units as gate data; used as absolute error floor in quadrature with rel_error and per-gate SFz_std columns when present"
   },
 
   "gate_times_ms": [

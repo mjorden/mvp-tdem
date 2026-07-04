@@ -22,7 +22,9 @@ tx:
   geometry: concentric_loop
   frequency_hz: 25
   waveform: bipolar_square
-  on_time_us: 4000
+  on_time_us: 4000      # full current-on duration per half-cycle, ramps included
+  ramp_off_us: 800      # linear turn-off ramp (#52); gate times are referenced
+                        # to the END of this ramp
 
 # V/(A·m⁴), same units as calibrated gate data
 noise_floor: 1.0e-12
