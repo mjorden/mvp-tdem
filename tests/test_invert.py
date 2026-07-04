@@ -25,21 +25,26 @@ def test_recover_halfspace(fwd):
     """Noise-free half-space data should invert back to ~the true resistivity."""
     rho_true = 50.0
     d_obs = fwd.predict(np.full(N_LAYERS, rho_true), BIRD)
-    rho, chi, ok = invert_sounding(fwd, d_obs, BIRD, rho_initial=200.0, max_iter=40)
+    rho, chi, ok, doi_m, rho_sd = invert_sounding(fwd, d_obs, BIRD, rho_initial=200.0, max_iter=40)
     assert ok
     assert chi < 1.0  # noise-free data must fit to well within assigned errors
     # TDEM equivalence: resistive structure is weakly resolved, so allow a
     # generous factor-3 band around the geometric mean rather than exact recovery
     gm = 10 ** np.mean(np.log10(rho))
     assert rho_true / 3 < gm < rho_true * 3, f"recovered {gm:.1f} vs true {rho_true}"
+    # DOI must be a finite positive depth (can reach depth_max for noise-free data)
+    assert doi_m > 0
+    # rho_sd must be per-layer multiplicative factors >= 1
+    assert rho_sd.shape == rho.shape
+    assert np.all(rho_sd >= 1.0)
 
 
 def test_conductor_detected(fwd):
     """Two-decade contrast: conductive earth inverts more conductive than resistive earth."""
     d_cond = fwd.predict(np.full(N_LAYERS, 10.0), BIRD)
     d_res = fwd.predict(np.full(N_LAYERS, 1000.0), BIRD)
-    rho_c, _, _ = invert_sounding(fwd, d_cond, BIRD)
-    rho_r, _, _ = invert_sounding(fwd, d_res, BIRD)
+    rho_c, *_ = invert_sounding(fwd, d_cond, BIRD)
+    rho_r, *_ = invert_sounding(fwd, d_res, BIRD)
     # conductors are well resolved by TDEM; resistors suffer equivalence —
     # require clear separation (factor 3+) rather than the full 100x contrast
     assert np.median(rho_c) < np.median(rho_r) / 3
@@ -49,7 +54,7 @@ def test_nan_gates_excluded(fwd):
     """Masked gates shouldn't break the inversion."""
     d_obs = fwd.predict(np.full(N_LAYERS, 100.0), BIRD)
     d_obs[5:] = np.nan  # keep only 5 early gates
-    rho, chi, ok = invert_sounding(fwd, d_obs, BIRD)
+    rho, chi, ok, *_ = invert_sounding(fwd, d_obs, BIRD)
     assert np.all(np.isfinite(rho))
 
 
@@ -62,7 +67,7 @@ def test_too_few_gates_raises(fwd):
 
 def test_bounds_respected(fwd):
     d_obs = fwd.predict(np.full(N_LAYERS, 5.0), BIRD)
-    rho, _, _ = invert_sounding(fwd, d_obs, BIRD, rho_min=20.0, rho_max=500.0)
+    rho, *_ = invert_sounding(fwd, d_obs, BIRD, rho_min=20.0, rho_max=500.0)
     assert np.all(rho >= 20.0 - 1e-6)
     assert np.all(rho <= 500.0 + 1e-6)
 
@@ -129,9 +134,16 @@ def test_to_frame_layout(fwd):
     result = invert_line(df, _config(), fwd=fwd, verbose=False)
     frame = result.to_frame()
     assert len(frame) == 2 * N_LAYERS
-    assert {"distance", "depth_top", "rho", "chi"} <= set(frame.columns)
+    assert {"distance", "depth_top", "rho", "chi", "doi_m", "rho_sd"} <= set(frame.columns)
     # second sounding is 50 m along the line
     assert frame[frame["fiducial"] == 1001]["distance"].iloc[0] == pytest.approx(50.0)
+    # doi_m is constant per sounding (repeated across layers)
+    for fid in frame["fiducial"].unique():
+        sub = frame[frame["fiducial"] == fid]
+        assert sub["doi_m"].nunique() == 1
+        assert (sub["doi_m"] > 0).all()
+    # rho_sd values are per-layer multiplicative factors >= 1
+    assert (frame["rho_sd"] >= 1.0).all()
 
 
 def test_ground_elevation_computed(fwd):
@@ -150,8 +162,8 @@ def test_cooling_stops_at_smoothest_fitting_model(fwd):
     rng = np.random.default_rng(7)
     d_true = fwd.predict(np.full(N_LAYERS, 100.0), BIRD)
     d_obs = d_true * (1 + 0.05 * rng.standard_normal(len(d_true)))
-    rho, chi, ok = invert_sounding(fwd, d_obs, BIRD, rel_error=0.05,
-                                   chi_target=1.0, max_iter=40)
+    rho, chi, ok, *_ = invert_sounding(fwd, d_obs, BIRD, rel_error=0.05,
+                                       chi_target=1.0, max_iter=40)
     # cooling accepts the FIRST (smoothest) stage reaching target — chi should
     # land near 1, not grossly below (which would mean fitting noise)
     assert chi <= 1.0
@@ -162,12 +174,12 @@ def test_reference_model_decoupled_from_start(fwd):
     """#18: rho_ref pins the damping target; warm start must not change the objective."""
     d_obs = fwd.predict(np.full(N_LAYERS, 100.0), BIRD)
     weird_start = np.full(N_LAYERS, 3000.0)
-    rho_a, chi_a, _ = invert_sounding(fwd, d_obs, BIRD,
-                                      rho_initial=weird_start, rho_ref=100.0,
-                                      max_iter=40)
-    rho_b, chi_b, _ = invert_sounding(fwd, d_obs, BIRD,
-                                      rho_initial=100.0, rho_ref=100.0,
-                                      max_iter=40)
+    rho_a, chi_a, *_ = invert_sounding(fwd, d_obs, BIRD,
+                                       rho_initial=weird_start, rho_ref=100.0,
+                                       max_iter=40)
+    rho_b, chi_b, *_ = invert_sounding(fwd, d_obs, BIRD,
+                                       rho_initial=100.0, rho_ref=100.0,
+                                       max_iter=40)
     # same objective → both should fit; recovered models comparable in the
     # well-resolved shallow half
     assert chi_a <= 1.0 and chi_b <= 1.0

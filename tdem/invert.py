@@ -41,7 +41,7 @@ import pandas as pd
 from scipy.optimize import least_squares
 
 from .forward import TDEMForward, forward_from_config, layer_depths
-from .load import gate_columns
+from .load import gate_columns, gate_std_columns
 from .qc import good_gate_array
 
 
@@ -62,6 +62,9 @@ class SoundingResult:
     chi: float                # error-normalized misfit; chi ~ 1 = fit to errors (#4)
     n_gates_used: int
     converged: bool
+    # Linearized appraisal from the analytic Jacobian at the accepted model (#58/#12)
+    doi_m: float | None = None          # depth of investigation, metres
+    rho_sd: np.ndarray | None = None    # per-layer multiplicative uncertainty (10^σ_m)
 
 
 @dataclass
@@ -86,6 +89,8 @@ class LineResult:
                     "rho": r,
                     "chi": s.chi,
                     "converged": s.converged,
+                    "doi_m": s.doi_m,
+                    "rho_sd": s.rho_sd[i] if s.rho_sd is not None else None,
                 })
         df = pd.DataFrame(rows)
         if len(self.soundings) > 1:
@@ -121,7 +126,8 @@ def invert_sounding(
     rel_error: float = 0.05,
     chi_target: float = 1.0,
     cooling_octaves: int = 4,
-) -> tuple[np.ndarray, float, bool]:
+    gate_sd: np.ndarray | None = None,
+) -> tuple[np.ndarray, float, bool, float, np.ndarray]:
     """
     Invert one sounding for a layered resistivity model.
 
@@ -139,8 +145,14 @@ def invert_sounding(
     rho_ref      : scalar or per-layer damping REFERENCE model; defaults to
                    rho_initial. Kept separate (#18) so a warm start changes
                    the initialization but never the objective.
-    rel_error    : assumed relative data error — sets W_d (#17)
+    rel_error    : minimum relative data error floor — sets W_d floor (#17)
     noise_floor  : additional absolute error floor, same units as d_obs
+    gate_sd      : optional (n_gates,) per-gate absolute standard deviation from
+                   stacking (same units as d_obs).  When provided, combined in
+                   quadrature with rel_error (floor) and noise_floor:
+                   sd_log = sqrt(rel_error² + (gate_sd/d)² + (noise_floor/d)²)
+                   This replaces the flat rel_error model when SFz_std columns
+                   are present in the survey CSV (Auken & Christiansen 2004).
 
     Returns
     -------
@@ -166,11 +178,18 @@ def invert_sounding(
     lo, hi = np.log10(rho_min), np.log10(rho_max)
     m = np.clip(_to_log(rho_initial), lo, hi)
 
-    # log-space data weights: sd(log d) ≈ sqrt(rel_error² + (floor/d)²)
+    # log-space data weights:
+    #   sd(log d) ≈ sqrt(rel_error² + (gate_sd/d)² + (noise_floor/d)²)
+    # rel_error acts as a floor; gate_sd (from stacking) provides per-gate
+    # uncertainty when SFz_std columns are available (#61).
     log_d = np.log(d_obs[use])
-    abs_err = noise_floor / d_obs[use] if noise_floor > 0 else 0.0
-    sd_log = np.sqrt(rel_error**2 + abs_err**2)
-    w_d = 1.0 / sd_log
+    n_use = int(use.sum())
+    std_rel = (np.asarray(gate_sd, dtype=float)[use] / d_obs[use]
+               if gate_sd is not None else np.zeros(n_use))
+    abs_err = (noise_floor / d_obs[use] if noise_floor > 0
+               else np.zeros(n_use))
+    sd_log = np.sqrt(rel_error**2 + std_rel**2 + abs_err**2)
+    w_d = 1.0 / sd_log   # always (n_use,) array — required by analytic jac
 
     # cell-size-weighted vertical first-difference operator (#11):
     # penalize roughness per metre, not per interface — log-spaced meshes
@@ -196,17 +215,25 @@ def invert_sounding(
             return np.concatenate([r_data, sqrt_a * (Dw @ m_),
                                    sqrt_as * (m_ - m_ref)])
 
+        def jac(m_):
+            pred, J_full = fwd.predict_and_jacobian(m_, bird_height_m)
+            pred_use = np.maximum(pred[use], 1e-300)
+            J_data = w_d[:, None] * J_full[use] / pred_use[:, None]
+            return np.vstack([J_data, sqrt_a * Dw, sqrt_as * np.eye(n)])
+
         return least_squares(
             residuals, m_start,
+            jac=jac,
             bounds=(np.full(n, lo), np.full(n, hi)),
             method="trf",
-            max_nfev=max_iter * (n + 1),
+            max_nfev=max_iter,   # analytic jac: ~1 fun eval/iter, not n+1 (#58)
             x_scale="jac",
         )
 
     # Occam cooling loop (#10): smoothest model that reaches chi_target
     ok = True
     chi = np.inf
+    alpha = alpha_z   # will hold the accepted stage's roughness multiplier
     for k in range(cooling_octaves + 1):
         alpha = alpha_z * 2.0 ** (cooling_octaves - k)
         result = _solve(m, alpha)
@@ -215,7 +242,29 @@ def invert_sounding(
         if chi <= chi_target:
             break
 
-    return 10.0 ** m, chi, ok
+    # Linearized appraisal from the analytic Jacobian at the accepted model (#58)
+    pred_f, J_f = fwd.predict_and_jacobian(m, bird_height_m)
+    pred_use_f = np.maximum(pred_f[use], 1e-300)
+    J_data_f = w_d[:, None] * J_f[use] / pred_use_f[:, None]  # (n_use, n_layers)
+
+    # DOI via column sensitivity (Christiansen & Auken 2012)
+    col_sq = np.sum(J_data_f ** 2, axis=0)
+    s_norm = col_sq / (col_sq.max() + 1e-300)
+    all_depths = layer_depths(fwd.thicknesses)
+    sensitive = np.where(s_norm >= 0.2)[0]
+    doi_m = float(all_depths[min(sensitive[-1] + 1, len(all_depths) - 1)]) \
+        if len(sensitive) else float(all_depths[1])
+
+    # Per-layer multiplicative uncertainty: 10^sqrt(diag(C_m))
+    sqrt_a_final = np.sqrt(alpha)
+    J_full_f = np.vstack([J_data_f, sqrt_a_final * Dw, sqrt_as * np.eye(n)])
+    M = J_full_f.T @ J_full_f
+    try:
+        rho_sd = 10.0 ** np.sqrt(np.maximum(np.diag(np.linalg.inv(M)), 0.0))
+    except np.linalg.LinAlgError:
+        rho_sd = np.full(n, np.nan)
+
+    return 10.0 ** m, chi, ok, doi_m, rho_sd
 
 
 # ---------------------------------------------------------------------------
@@ -259,6 +308,11 @@ def invert_line(
         c.startswith("_qc_gate_") for c in df_line.columns
     ) else df_line[gate_columns(df_line)].to_numpy(dtype=float)
 
+    # per-gate standard deviations from stacking (#61): used as the signal
+    # component of the error model when SFz_std columns are present
+    std_cols = gate_std_columns(df_line)
+    std_data = df_line[std_cols].to_numpy(dtype=float) if std_cols else None
+
     skip = df_line["sounding_mask"].to_numpy() if "sounding_mask" in df_line.columns \
         else np.zeros(len(df_line), dtype=bool)
 
@@ -278,6 +332,7 @@ def invert_line(
                 rho_start = inv["rho_initial"]
             continue
         row = df_line.iloc[i]
+        g_sd = std_data[i] if std_data is not None else None
         kwargs = dict(
             bird_height_m=row["dem"],
             noise_floor=noise_floor,
@@ -287,19 +342,21 @@ def invert_line(
             alpha_s=inv["alpha_s"],
             alpha_z=inv["alpha_z"],
             max_iter=inv["max_iter"],
-            rel_error=inv.get("rel_error", 0.05),   # #17
+            rel_error=inv.get("rel_error", 0.05),   # #17: floor when gate_sd present
             chi_target=inv.get("chi_target", 1.0),  # #10
+            gate_sd=g_sd,                           # #61: per-gate sd from stacking
         )
         try:
-            rho, chi, ok = invert_sounding(fwd, data[i], rho_initial=rho_start, **kwargs)
+            rho, chi, ok, doi_m, rho_sd = invert_sounding(
+                fwd, data[i], rho_initial=rho_start, **kwargs)
             # warm-start trap guard: bad or non-converged fit from a warm
             # start → retry cold (#15: 'not ok' also triggers)
             if (chi > chi_retry_threshold or not ok) and warm_start \
                     and not np.isscalar(rho_start):
-                rho2, chi2, ok2 = invert_sounding(
+                rho2, chi2, ok2, doi_m2, rho_sd2 = invert_sounding(
                     fwd, data[i], rho_initial=inv["rho_initial"], **kwargs)
                 if chi2 < chi:
-                    rho, chi, ok = rho2, chi2, ok2
+                    rho, chi, ok, doi_m, rho_sd = rho2, chi2, ok2, doi_m2, rho_sd2
         except ValueError:
             n_failed += 1
             n_gap += 1
@@ -319,6 +376,8 @@ def invert_line(
             chi=chi,
             n_gates_used=int(np.isfinite(data[i]).sum()),
             converged=ok,
+            doi_m=doi_m,
+            rho_sd=rho_sd,
         ))
 
         if warm_start:
