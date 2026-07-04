@@ -70,7 +70,7 @@ def _em_df(n_hc=50, n_gates=3, value=10.0):
 
 def test_stack_polarity_alignment():
     """Alternating-sign raw values must stack to the positive response."""
-    out = stack_soundings(_em_df(), n_stack=25)
+    out = stack_soundings(_em_df(), n_stack=24)
     assert len(out) == 2
     assert np.allclose(out[["gate_00", "gate_01", "gate_02"]], 10.0)
 
@@ -78,25 +78,64 @@ def test_stack_polarity_alignment():
 def test_stack_trimmed_mean_rejects_spike():
     df = _em_df()
     df.loc[3, ["g00", "g01", "g02"]] *= 20  # sferic hit on one half-cycle
-    out = stack_soundings(df, n_stack=25, trim_frac=0.1)
+    out = stack_soundings(df, n_stack=24, trim_frac=0.1)
     assert np.allclose(out.loc[0, ["gate_00", "gate_01", "gate_02"]], 10.0)
 
 
 def test_stack_keeps_spread_and_drops_partial_window():
-    out = stack_soundings(_em_df(n_hc=60), n_stack=25)  # 60 = 2 full + 10
+    out = stack_soundings(_em_df(n_hc=60), n_stack=24)  # 60 = 2 full + 12
     assert len(out) == 2
     assert "gate_std_00" in out.columns
-    assert (out["n_used"] == 25).all()
+    assert (out["n_used"] == 24).all()
 
 
 def test_stack_timestamp_is_window_centre():
-    out = stack_soundings(_em_df(), n_stack=25)
-    assert out.loc[0, "t_utc"] == pytest.approx(T0 + np.mean(np.arange(25)) / 50)
+    out = stack_soundings(_em_df(), n_stack=24)
+    assert out.loc[0, "t_utc"] == pytest.approx(T0 + np.mean(np.arange(24)) / 50)
 
 
 def test_stack_requires_t_utc():
     with pytest.raises(ValueError, match="t_utc"):
-        stack_soundings(_em_df().drop(columns="t_utc"), n_stack=25)
+        stack_soundings(_em_df().drop(columns="t_utc"), n_stack=24)
+
+
+def test_stack_odd_n_stack_rounds_up_and_warns():
+    """#34: an odd window cannot cancel a DC offset — rounded up with a warning."""
+    with pytest.warns(UserWarning, match="odd"):
+        out = stack_soundings(_em_df(n_hc=52), n_stack=25)
+    assert (out["n_used"] == 26).all()
+
+
+def test_stack_even_window_cancels_dc_offset():
+    """#34: a constant receiver offset b (logged as signal*pol + b) must
+    cancel exactly over an even window of bipolar pairs."""
+    df = _em_df()
+    for col in ("g00", "g01", "g02"):
+        df[col] = df[col] + 0.5   # +b on every half-cycle, regardless of polarity
+    out = stack_soundings(df, n_stack=24, trim_frac=0.1)
+    assert np.allclose(out[["gate_00", "gate_01", "gate_02"]], 10.0), \
+        "even bipolar window must cancel the DC offset"
+
+
+def test_stack_std_is_robust_se():
+    """#33: gate_std must be the SE of the stacked value (~sigma/sqrt(n_eff)),
+    not the single-half-cycle spread (~sigma), and a sferic the trimmed mean
+    rejects must not inflate it."""
+    rng = np.random.default_rng(3)
+    df = _em_df(n_hc=48)
+    noise = rng.normal(0, 1.0, 48)
+    for col in ("g00", "g01", "g02"):
+        df[col] = df[col] + noise * df["polarity"]  # sigma=1 after alignment
+    out = stack_soundings(df, n_stack=24, trim_frac=0.1)
+    se_clean = out["gate_std_00"].to_numpy()
+    # n_eff = round(24*0.8) = 19 → SE ≈ 0.23; the old raw window std was ~1.0
+    assert np.all(se_clean < 0.6), f"gate_std {se_clean} is a spread, not an SE"
+    assert np.all(se_clean > 0.05)
+
+    df.loc[5, ["g00", "g01", "g02"]] *= 20  # sferic on one half-cycle
+    out_hit = stack_soundings(df, n_stack=24, trim_frac=0.1)
+    ratio = out_hit.loc[0, "gate_std_00"] / se_clean[0]
+    assert ratio < 3, f"single sferic inflated the SE {ratio:.1f}x — not robust"
 
 
 # ---------------------------------------------------------------------------
@@ -132,10 +171,18 @@ def test_calibrate_measured_moment():
 
 
 def test_calibrate_falls_back_to_nominal_current_in_gaps():
+    """#35: nominal-filled soundings must show up in the provenance string."""
     txcur = pd.DataFrame({"t_utc": [T0 + 100, T0 + 101], "current_a": [220.0, 220.0]})
     out, mode = calibrate(_stacked(), _INSTRUMENT, txcur_df=txcur)  # sounding outside range
-    assert mode == "measured"
+    assert mode == "measured (1 of 1 nominal-filled)"
     assert out.loc[0, "gate_00"] == pytest.approx(1e-3)
+
+
+def test_calibrate_fully_measured_mode_unchanged():
+    """#35: no gaps → plain 'measured', no fill annotation."""
+    txcur = pd.DataFrame({"t_utc": [T0 - 1, T0 + 1], "current_a": [200.0, 200.0]})
+    _, mode = calibrate(_stacked(), _INSTRUMENT, txcur_df=txcur)
+    assert mode == "measured"
 
 
 # ---------------------------------------------------------------------------
@@ -225,3 +272,67 @@ def test_stacked_gate_columns_numeric_order():
     cols = ("gate_100", "gate_09", "gate_10", "gate_11", "gate_std_09", "gate_std_100")
     df = pd.DataFrame({c: [0.0] for c in cols})
     assert stacked_gate_columns(df) == ["gate_09", "gate_10", "gate_11", "gate_100"]
+
+
+# ---------------------------------------------------------------------------
+# emit (#23 dummy round-trip, #33 std consumer path)
+# ---------------------------------------------------------------------------
+
+_EMIT_INSTRUMENT = {
+    "instrument": {"name": "TestTEM"},
+    "rx": {"gain": 1000.0, "coil_area_m2": 100.0, "orientation": "Z"},
+    "tx": {"moment_nominal_am2": 400_000, "n_turns": 4, "loop_area_m2": 500.0,
+           "frequency_hz": 25, "waveform": "bipolar_square", "on_time_us": 4000,
+           "geometry": "concentric_loop", "loop_radius_m": 13.0},
+    "gate_times_ms": [0.1, 1.0],
+    "noise_floor": 1e-12,
+}
+
+_EMIT_SURVEY_CFG = {
+    "survey": {"name": "emit_test", "epsg": 32611},
+    "inversion": {"n_layers": 8, "depth_min_m": 1, "depth_max_m": 100,
+                  "rho_initial": 100, "rho_min": 1, "rho_max": 10000,
+                  "alpha_s": 1e-4, "alpha_z": 1.0, "max_iter": 20,
+                  "rel_error": 0.05, "chi_target": 1.0},
+}
+
+
+def _emit_soundings():
+    return pd.DataFrame({
+        "line": [1000, 1000], "fid": [1, 2],
+        "easting": [500000.0, 500050.0], "northing": [4900000.0, 4900000.0],
+        "elevation": [1450.0, 1450.0], "dem": [35.0, 35.0],
+        "lat": [44.2, 44.2], "lon": [-119.4, -119.4],
+        "gate_00": [2.3e-8, np.nan], "gate_std_00": [1e-10, 1e-10],
+        "gate_01": [1.1e-8, 1.0e-8], "gate_std_01": [5e-11, np.nan],
+    })
+
+
+def test_emit_nan_gates_become_dummy_not_nan_text(tmp_path):
+    """#23: NaN gates must be written as the -9999 dummy, never 'nan' text."""
+    from tdem.ingest.emit import emit_survey
+    csv_path, cfg_path = emit_survey(
+        _emit_soundings(), _EMIT_INSTRUMENT, _EMIT_SURVEY_CFG,
+        tmp_path / "survey.csv", tmp_path / "sidecar.json",
+        provenance={"note": "test"},
+    )
+    text = csv_path.read_text()
+    assert "nan" not in text.lower(), "literal 'nan' text leaked into the deliverable"
+    assert "-9999.0" in text, "NaN gates must be emitted as the -9999 dummy"
+
+
+def test_emit_round_trips_through_loader(tmp_path):
+    """#23 + #33: the emitted pair loads back with NaN restored and the
+    measured std columns carried as sfz_std_NN."""
+    from tdem.ingest.emit import emit_survey
+    from tdem.load import load_survey, gate_std_columns
+    csv_path, cfg_path = emit_survey(
+        _emit_soundings(), _EMIT_INSTRUMENT, _EMIT_SURVEY_CFG,
+        tmp_path / "survey.csv", tmp_path / "sidecar.json",
+        provenance={"note": "test"},
+    )
+    df, config = load_survey(csv_path, cfg_path)
+    assert np.isnan(df.loc[1, "sfz_00"]), "-9999 dummy must load back as NaN"
+    assert gate_std_columns(df) == ["sfz_std_00", "sfz_std_01"]
+    assert np.isnan(df.loc[1, "sfz_std_01"])
+    assert df.loc[0, "sfz_std_00"] == pytest.approx(1e-10)

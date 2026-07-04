@@ -9,7 +9,7 @@ survey:
   geoid_offset_m: -20.0   # ellipsoidal - orthometric, fixed per survey area (MVP)
 
 ingest:
-  n_stack: 25             # half-cycles per sounding (0.5 s at 25 Hz base freq)
+  n_stack: 24             # half-cycles per sounding; even so bipolar pairs cancel DC offset (#34)
   trim_frac: 0.1          # trimmed from EACH tail before the stack mean
   max_gap_s: 2.0          # never interpolate nav/current across wider gaps
 

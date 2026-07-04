@@ -91,14 +91,17 @@ timing errors of even a fraction of a gate width corrupt the decay).
 
 Raw half-cycles → soundings. Bipolar square wave means alternating
 polarity: flip odd half-cycles, then stack `n_stack` consecutive
-half-cycles (config; default ≈ 1 sounding per 0.5 s of flight).
+half-cycles (config; must be even so bipolar pairs cancel any receiver
+DC offset, #34 — odd values are rounded up with a warning; default 24
+≈ 1 sounding per 0.5 s of flight).
 
 - **Robust stack:** trimmed mean (default trim 20%) per gate across the
   window, to reject sferic hits without a separate despiking pass.
-- **Per-gate spread:** also keep the std across the stack window per
-  gate → emitted as `SFz_std[i]` columns. `load.py`/`qc.py` don't use
-  them yet, but the noise-floor logic wants them eventually
-  (`_noise_units` note in the example sidecar anticipates this).
+- **Per-gate uncertainty:** the robust standard error of the stacked
+  value (1.4826·MAD/√n_eff, #33) → emitted as `SFz_std[i]` columns and
+  loaded back as `sfz_std_NN` via the sidecar's `sfz_std_prefix`
+  (`load.gate_std_columns()`). Wiring it into the inversion's `sd_log`
+  is tracked with the invert-side error-model work.
 - Sounding timestamp = centre of the stack window.
 - If the instrument gates on-board but we ever log full waveforms, gate
   integration happens here too (Phase 2; see below).

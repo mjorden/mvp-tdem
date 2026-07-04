@@ -9,8 +9,8 @@ Write the canonical deliverable pair consumed by tdem.load.load_survey():
 This is the one place ingest drops data, and it says so: soundings with
 NaN position (nav gaps) or line == -1 (turns) are counted and removed.
 Remaining NaN gate values are written as the -9999 dummy that
-load._clean() already recognizes (empty CSV fields would break its
-whitespace-or-comma separator).
+load._clean() already recognizes — substituted before float formatting,
+since formatting NaN yields the literal string "nan" (#23).
 """
 
 from __future__ import annotations
@@ -19,11 +19,18 @@ import hashlib
 import json
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from .stack import stacked_gate_columns
 
 _DUMMY = -9999.0
+
+
+def _fmt_gate(v: float) -> str:
+    # fill BEFORE formatting (#23): f"{nan:.6e}" is the literal string "nan",
+    # and a post-hoc fillna on the resulting object column matches nothing
+    return f"{v:.6e}" if np.isfinite(v) else f"{_DUMMY:.1f}"
 
 
 def emit_survey(
@@ -65,9 +72,9 @@ def emit_survey(
     })
     for i, col in enumerate(gate_cols):
         idx = col.removeprefix("gate_")  # full index string, not col[-2:] (#41)
-        out[f"SFz[{i}]"]     = df[col].map(lambda v: f"{v:.6e}")
-        out[f"SFz_std[{i}]"] = df[f"gate_std_{idx}"].map(lambda v: f"{v:.6e}")
-    out = out.fillna(_DUMMY)
+        out[f"SFz[{i}]"]     = df[col].map(_fmt_gate)
+        out[f"SFz_std[{i}]"] = df[f"gate_std_{idx}"].map(_fmt_gate)
+    out = out.fillna(_DUMMY)  # non-gate numerics (e.g. lat/lon nav gaps)
 
     out.to_csv(out_csv, index=False)
 
@@ -103,6 +110,7 @@ def build_sidecar(instrument: dict, survey_cfg: dict, n_gates: int, provenance: 
             "elevation": "Elevation", "dem": "DEM",
             "latitude": "Latitude", "longitude": "Longitude",
             "sfz_prefix": "SFz", "sfz_n": n_gates, "sfz_format": "bracket",
+            "sfz_std_prefix": "SFz_std",
         },
         "system": {
             "tx_moment_am2":      tx["moment_nominal_am2"],

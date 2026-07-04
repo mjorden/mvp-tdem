@@ -31,7 +31,8 @@ def load_survey(csv_path: str | Path, config_path: str | Path) -> tuple[pd.DataF
     Returns
     -------
     df     : tidy DataFrame with standardised column names (see _RENAME_COLS)
-             plus one column per gate: sfz_00, sfz_01, ...
+             plus one column per gate: sfz_00, sfz_01, ... — and, when the
+             sidecar maps sfz_std_prefix, one sfz_std_NN per gate (#33)
     config : parsed sidecar dict (system params, gate_times_ms, inversion defaults)
     """
     csv_path    = Path(csv_path)
@@ -82,6 +83,18 @@ def gate_columns(df: pd.DataFrame) -> list[str]:
     gate values with gate_times_ms.
     """
     return sorted((c for c in df.columns if _GATE_COL_RE.match(c)), key=gate_index)
+
+
+_GATE_STD_COL_RE = re.compile(r"^sfz_std_(\d+)$")
+
+
+def gate_std_columns(df: pd.DataFrame) -> list[str]:
+    """
+    Return sfz_std_* columns (measured per-gate std, #33) in numeric gate
+    order. Empty when the deliverable carries no std columns.
+    """
+    return sorted((c for c in df.columns if _GATE_STD_COL_RE.match(c)),
+                  key=lambda c: int(_GATE_STD_COL_RE.match(c).group(1)))
 
 
 def gate_array(df: pd.DataFrame) -> np.ndarray:
@@ -223,14 +236,29 @@ def _apply_column_map(raw: pd.DataFrame, col_map: dict) -> pd.DataFrame:
             f"CSV columns: {list(raw.columns)}"
         )
 
-    gate_std = []
+    extracted = []
     for i, raw_col in enumerate(gate_raw):
         name = f"sfz_{i:02d}"
         df[name] = pd.to_numeric(raw[raw_col], errors="coerce")
-        gate_std.append(name)
+        extracted.append(name)
+
+    # measured per-gate std, when the deliverable carries it (#33)
+    std_prefix = col_map.get("sfz_std_prefix")
+    if std_prefix:
+        std_raw = _gate_column_names(std_prefix, n, fmt)
+        std_missing = [c for c in std_raw if c not in raw.columns]
+        if std_missing:
+            raise ValueError(
+                f"sfz_std_prefix is configured but std columns are missing from the CSV: "
+                f"{std_missing[:5]}{'...' if len(std_missing) > 5 else ''}"
+            )
+        for i, raw_col in enumerate(std_raw):
+            name = f"sfz_std_{i:02d}"
+            df[name] = pd.to_numeric(raw[raw_col], errors="coerce")
+            extracted.append(name)
 
     # documented schema only (#36): standardised ids + one column per gate
-    keep = [std for std in _RENAME_COLS if std in df.columns] + gate_std
+    keep = [std for std in _RENAME_COLS if std in df.columns] + extracted
     return df[keep]
 
 

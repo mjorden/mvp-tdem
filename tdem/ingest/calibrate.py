@@ -27,8 +27,9 @@ def calibrate(
     """
     Normalize stacked gate values (and stds) in place-of-copy.
 
-    Returns (calibrated df, moment_mode) where moment_mode is
-    "measured" or "nominal".
+    Returns (calibrated df, moment_mode) where moment_mode is "measured",
+    "measured (N of M nominal-filled)" when Tx-log gaps forced nominal
+    fallback for some soundings (#35), or "nominal".
     """
     rx = instrument["rx"]
     tx = instrument["tx"]
@@ -44,9 +45,17 @@ def calibrate(
         # fall back to nominal current inside Tx-log gaps rather than
         # losing the sounding — the EM data itself is fine
         nominal_current = tx["moment_nominal_am2"] / (tx["n_turns"] * tx["loop_area_m2"])
+        n_filled = int(np.isnan(current).sum())
         current = np.where(np.isnan(current), nominal_current, current)
         moment = current * tx["n_turns"] * tx["loop_area_m2"]
-        moment_mode = "measured"
+        if n_filled:
+            # moment errors map 1:1 into amplitude — provenance must not
+            # claim "measured" for soundings normalized by the nominal (#35)
+            print(f"[calibrate] Tx-current gaps: {n_filled} of {len(soundings)} "
+                  "soundings nominal-filled")
+            moment_mode = f"measured ({n_filled} of {len(soundings)} nominal-filled)"
+        else:
+            moment_mode = "measured"
     else:
         moment = np.full(len(soundings), float(tx["moment_nominal_am2"]))
         moment_mode = "nominal"

@@ -36,6 +36,7 @@ Gate columns are described, not listed:
 | `sfz_prefix` | `"SFz"` | Common prefix of the gate columns |
 | `sfz_n` | `20` | Number of gates — **must equal `len(gate_times_ms)`** |
 | `sfz_format` | `"bracket"` | `bracket` → `SFz[0]…SFz[19]` · `underscore` → `SFz_00…SFz_19` · `zero_padded` → `SFz00…SFz19` |
+| `sfz_std_prefix` | `"SFz_std"` | Optional — prefix of measured per-gate std columns (#33); same count and format as the gates. Loaded as `sfz_std_NN`, accessible via `load.gate_std_columns()` |
 
 ## `system` — acquisition system parameters
 
