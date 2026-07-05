@@ -117,6 +117,42 @@ def test_negative_late_gate_not_flagged():
     assert not df.loc[0, "_qc_neg_early"]
 
 
+def test_negative_split_is_time_based():
+    """#66.6: the early/late boundary follows gate TIME, not index."""
+    df = _make_sounding(n=3)
+    gcols = gate_columns(df)
+    # GATE_TIMES: index 6 = 0.64 ms (< 1.0 → early), index 8 = 2.56 ms (late)
+    df.loc[0, gcols[6]] = -1e-9
+    df.loc[1, gcols[8]] = -1e-12
+    df = _negative_gate_flag(df, gcols, GATE_TIMES, early_max_ms=1.0)
+    assert df.loc[0, "_qc_neg_early"], "early-time negative must flag"
+    assert not df.loc[1, "_qc_neg_early"], "late-time negative must be preserved"
+
+
+def test_late_negative_survives_run_qc():
+    """#55: a real late-time negative with |x| >= floor is NOT NaN'd downstream."""
+    df = _make_sounding(n=20)
+    last = gate_columns(df)[-1]
+    df[last] = -1e-9          # late-time negative, amplitude well above the floor
+    config = _make_config(noise_floor=1e-12)
+    df_qc = run_qc(df, config)
+    arr = good_gate_array(df_qc)
+    # last gate must survive as a (negative) value, not be masked to NaN
+    assert np.all(np.isfinite(arr[:, -1])), \
+        "late-time negatives above the floor must not be masked by the noise-floor flag"
+    assert np.all(arr[:, -1] < 0)
+
+
+def test_monotonicity_detects_sign_flip():
+    """#14/#66.3: a +a → -a sign flip (|x| unchanged) is a reversal."""
+    df = _make_sounding(n=3)
+    gcols = gate_columns(df)
+    base = df.loc[0, gcols[1]]
+    df.loc[0, gcols[2]] = -base    # same magnitude, opposite sign
+    df = _monotonicity_flag(df, gcols, n_early=8, max_reversals=1, noise_floor=1e-12)
+    assert df.loc[0, "_qc_nonmono"], "sign flip with unchanged magnitude must count as a reversal"
+
+
 # ---------------------------------------------------------------------------
 # altitude_flag
 # ---------------------------------------------------------------------------
