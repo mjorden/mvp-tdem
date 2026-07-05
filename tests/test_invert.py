@@ -5,7 +5,9 @@ import pandas as pd
 import pytest
 
 from tdem.forward import TDEMForward, layer_thicknesses
-from tdem.invert import invert_sounding, invert_line, LineResult
+from tdem.invert import (
+    invert_sounding, invert_line, LineResult, _log_floored, _dlog_floored,
+)
 
 GATE_TIMES_MS = [0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 3.2, 6.4]
 N_LAYERS = 8
@@ -70,6 +72,43 @@ def test_bounds_respected(fwd):
     rho, *_ = invert_sounding(fwd, d_obs, BIRD, rho_min=20.0, rho_max=500.0)
     assert np.all(rho >= 20.0 - 1e-6)
     assert np.all(rho <= 500.0 + 1e-6)
+
+
+# ---------------------------------------------------------------------------
+# #53: sign-safe log transform (no zero-gradient cliff on negative predictions)
+# ---------------------------------------------------------------------------
+
+def test_log_floored_matches_log_well_above_eps():
+    x = np.array([1e-9, 1e-6, 1e-3])
+    eps = 1e-3 * x
+    assert np.allclose(_log_floored(x, eps), np.log(x))
+
+
+def test_log_floored_is_c1_continuous_at_eps():
+    eps = np.array([1e-9])
+    # value continuity: both branches meet at x == eps
+    assert np.isclose(_log_floored(eps, eps)[0], np.log(eps)[0])
+    # slope continuity: derivative is 1/eps on both sides of eps
+    assert np.isclose(_dlog_floored(eps, eps)[0], 1.0 / eps[0])
+
+
+def test_dlog_floored_nonzero_gradient_for_negative_pred():
+    """The core of #53: a non-positive prediction must NOT give zero gradient."""
+    eps = np.array([1e-9, 1e-9])
+    x = np.array([-3e-9, 0.0])          # negative / zero prediction
+    g = _dlog_floored(x, eps)
+    assert np.all(g == 1.0 / eps)       # finite, large, positive — pushes pred up
+    assert np.all(g > 0)
+
+
+def test_negative_gate_excluded_from_gate_count(fwd):
+    """#59: n_gates_used counts USED gates (finite & positive), not merely finite."""
+    d = fwd.predict(np.full(N_LAYERS, 100.0), BIRD)
+    df = _make_line_df(fwd, [100.0])
+    gcols = [f"sfz_{k:02d}" for k in range(N_LAYERS)]
+    df.loc[0, gcols[-1]] = -abs(d[-1])          # one finite-but-negative gate
+    result = invert_line(df, _config(), fwd=fwd, verbose=False)
+    assert result.soundings[0].n_gates_used == N_LAYERS - 1
 
 
 # ---------------------------------------------------------------------------

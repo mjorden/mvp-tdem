@@ -10,10 +10,11 @@ Occam-style regularized least squares on m = log10(resistivity) per layer:
             + alpha   || W_z D m ||²      (cell-size-weighted vertical roughness)
 
 solved with scipy.optimize.least_squares (Trust Region Reflective, bounded),
-with an Occam cooling loop on the roughness multiplier (#10): start smooth
-(alpha = alpha_z * 2^cooling_octaves), halve until the error-normalized misfit
-chi reaches chi_target — the accepted model is the SMOOTHEST one that fits the
-data, per sounding, regardless of signal amplitude.
+with an Occam cooling loop on the roughness multiplier (#10, #60): start smooth
+(alpha = alpha_z * 2^cooling_octaves), halve down to a floor of alpha_z until the
+error-normalized misfit chi reaches chi_target, then one bisection stage refines
+toward the smoothest fitting multiplier — the accepted model is the SMOOTHEST one
+found that fits the data, per sounding, regardless of signal amplitude.
 
 W_z scales each first-difference row by 1/sqrt(spacing between layer tops)
 (#11) so log-spaced meshes penalize roughness per metre, not per interface —
@@ -43,6 +44,35 @@ from scipy.optimize import least_squares
 from .forward import TDEMForward, forward_from_config, layer_depths
 from .load import gate_columns, gate_std_columns
 from .qc import good_gate_array
+
+
+# ---------------------------------------------------------------------------
+# Sign-safe log transform for the data misfit (#53)
+# ---------------------------------------------------------------------------
+# The forward deliberately returns SIGNED dB/dt so that sign-changing transients
+# (bipolar train / IP) keep a differentiable fold (forward.py, #5). A plain
+# log(max(pred, 1e-300)) misfit throws that away: any trial model predicting a
+# non-positive gate produces a saturated ~10⁴σ residual whose finite-difference
+# gradient is exactly zero, so TRF stalls or wanders (very resistive trials at
+# late gates; warm starts stepping off a conductor onto resistive ground —
+# precisely the regime the chi>2 cold-retry guard exists to catch).
+#
+# We replace it with a C1-continuous "floored log": log(x) above a small
+# per-gate floor eps, continued linearly below eps with the matching slope 1/eps.
+# For any remotely reasonable fit (pred within ~3 decades of the datum) this is
+# identical to log(pred); only as pred approaches zero/negative does it switch to
+# a finite, gradient-carrying penalty that pushes the iterate back toward
+# positive predictions instead of onto a zero-gradient cliff.
+
+def _log_floored(x: np.ndarray, eps: np.ndarray) -> np.ndarray:
+    """log(x) for x > eps; log(eps) + (x-eps)/eps for x <= eps (C1-continuous)."""
+    safe = np.maximum(x, eps)                       # keep the log branch finite
+    return np.where(x > eps, np.log(safe), np.log(eps) + (x - eps) / eps)
+
+
+def _dlog_floored(x: np.ndarray, eps: np.ndarray) -> np.ndarray:
+    """d/dx of _log_floored: 1/x above eps, 1/eps below (never zero)."""
+    return np.where(x > eps, 1.0 / np.maximum(x, eps), 1.0 / eps)
 
 
 # ---------------------------------------------------------------------------
@@ -127,15 +157,20 @@ def invert_sounding(
     chi_target: float = 1.0,
     cooling_octaves: int = 4,
     gate_sd: np.ndarray | None = None,
+    min_gates: int = 3,
+    censor_factor: float = 3.0,
 ) -> tuple[np.ndarray, float, bool, float, np.ndarray]:
     """
     Invert one sounding for a layered resistivity model.
 
-    Occam cooling (#10): the roughness multiplier starts at
-    alpha_z * 2**cooling_octaves and is halved until chi <= chi_target
-    (or the floor alpha_z / 2 is reached). Each stage warm-starts from the
-    previous stage's model, so the accepted model is the smoothest one that
-    fits the data to its assigned errors.
+    Occam cooling (#10, #60): the roughness multiplier starts at
+    alpha_z * 2**cooling_octaves and is halved until chi <= chi_target (the grid
+    floor is alpha_z, i.e. 2**0 — NOT alpha_z/2). One bisection stage then
+    searches between the last rejected and first accepted multiplier for a
+    smoother model that still fits. Each stage warm-starts from the previous
+    stage's model, so the accepted model is the smoothest one found that fits
+    the data to its assigned errors. If no multiplier reaches chi_target the
+    roughest model is returned with chi > chi_target.
 
     Parameters
     ----------
@@ -147,6 +182,12 @@ def invert_sounding(
                    the initialization but never the objective.
     rel_error    : minimum relative data error floor — sets W_d floor (#17)
     noise_floor  : additional absolute error floor, same units as d_obs
+    min_gates    : minimum number of usable gates required to invert (#59).
+                   Below this a ValueError is raised rather than returning a
+                   model whose depth range is pure regularization.
+    censor_factor: gates with amplitude <= censor_factor*noise_floor are dropped
+                   from the misfit to avoid the near-floor upward-selection bias
+                   (#27). No effect when noise_floor == 0.
     gate_sd      : optional (n_gates,) per-gate absolute standard deviation from
                    stacking (same units as d_obs).  When provided, combined in
                    quadrature with rel_error (floor) and noise_floor:
@@ -166,9 +207,18 @@ def invert_sounding(
     """
     n = fwd.n_layers
     d_obs = np.asarray(d_obs, dtype=float)
-    use = np.isfinite(d_obs) & (d_obs > 0)
-    if use.sum() < 3:
-        raise ValueError(f"Only {use.sum()} usable gates — need at least 3 to invert.")
+    # #27: gates whose amplitude is within ~censor_factor× the noise floor are
+    # excluded from the misfit entirely. Near the floor only upward noise
+    # fluctuations survive the d>0 cut, AND sd_log = rel + floor/d shrinks for
+    # those survivors, so the inversion fits systematically inflated late-time
+    # data → spuriously conductive basements. Dropping them removes the bias at
+    # the cost of a little depth of investigation (which DOI already reports).
+    censor = censor_factor * noise_floor if noise_floor > 0 else 0.0
+    use = np.isfinite(d_obs) & (d_obs > censor)
+    if use.sum() < min_gates:
+        raise ValueError(
+            f"Only {int(use.sum())} usable gates (> {censor:.2e}) — "
+            f"need at least {min_gates} to invert.")
 
     def _to_log(rho):
         return np.full(n, np.log10(rho)) if np.isscalar(rho) \
@@ -191,6 +241,12 @@ def invert_sounding(
     sd_log = np.sqrt(rel_error**2 + std_rel**2 + abs_err**2)
     w_d = 1.0 / sd_log   # always (n_use,) array — required by analytic jac
 
+    # per-gate prediction floor for the sign-safe log transform (#53): 0.1% of
+    # the datum. A prediction below this is already a >3-decade misfit — deep in
+    # "awful fit" territory — so the log branch governs every reasonable model
+    # and only the non-physical pred→0/negative region gets the linear penalty.
+    eps_pred = 1e-3 * d_obs[use]
+
     # cell-size-weighted vertical first-difference operator (#11):
     # penalize roughness per metre, not per interface — log-spaced meshes
     # otherwise punish the shallow model ~100x harder than the deep model
@@ -204,21 +260,23 @@ def invert_sounding(
     def _chi(m_):
         pred = fwd.predict_log(m_, bird_height_m)
         return float(np.sqrt(np.mean(
-            ((np.log(np.maximum(pred[use], 1e-300)) - log_d) / sd_log) ** 2)))
+            ((_log_floored(pred[use], eps_pred) - log_d) / sd_log) ** 2)))
 
     def _solve(m_start, alpha):
         sqrt_a = np.sqrt(alpha)
 
         def residuals(m_):
             pred = fwd.predict_log(m_, bird_height_m)
-            r_data = w_d * (np.log(np.maximum(pred[use], 1e-300)) - log_d)
+            r_data = w_d * (_log_floored(pred[use], eps_pred) - log_d)
             return np.concatenate([r_data, sqrt_a * (Dw @ m_),
                                    sqrt_as * (m_ - m_ref)])
 
         def jac(m_):
             pred, J_full = fwd.predict_and_jacobian(m_, bird_height_m)
-            pred_use = np.maximum(pred[use], 1e-300)
-            J_data = w_d[:, None] * J_full[use] / pred_use[:, None]
+            # d/dm _log_floored(pred) = dlog_floored(pred) * dpred/dm — nonzero
+            # even where pred <= 0, so no zero-gradient cliff (#53)
+            dfac = _dlog_floored(pred[use], eps_pred)
+            J_data = w_d[:, None] * J_full[use] * dfac[:, None]
             return np.vstack([J_data, sqrt_a * Dw, sqrt_as * np.eye(n)])
 
         return least_squares(
@@ -230,22 +288,42 @@ def invert_sounding(
             x_scale="jac",
         )
 
-    # Occam cooling loop (#10): smoothest model that reaches chi_target
+    # Occam cooling loop (#10): the SMOOTHEST (largest-α) model that reaches
+    # chi_target. Coarse descent on a 2× α grid from α_z·2^octaves down to α_z
+    # (the floor is α_z, NOT α_z/2 — #60.5), then ONE bisection stage between the
+    # last rejected α (larger/smoother, chi>target) and the first accepted α to
+    # halve the roughness error for one extra solve (Constable et al. 1987, #60.1).
+    # If the very first (smoothest) grid point already fits, there is no larger α
+    # on the grid to search toward, so no bisection is done and an even smoother
+    # model may exist (#60.3). If no α reaches the target, the roughest model is
+    # returned with chi>target (an honest underfit; converged reflects only the
+    # solver's own success, #60.6).
     ok = True
     chi = np.inf
-    alpha = alpha_z   # will hold the accepted stage's roughness multiplier
+    alpha = alpha_z * 2.0 ** cooling_octaves
+    prev_alpha = None                # last α that failed the target (larger)
+    m_accept = m
     for k in range(cooling_octaves + 1):
         alpha = alpha_z * 2.0 ** (cooling_octaves - k)
         result = _solve(m, alpha)
         m, ok = result.x, bool(result.success)
         chi = _chi(m)
         if chi <= chi_target:
+            m_accept = m
+            if prev_alpha is not None:          # bisect toward the smoother side (#60.1)
+                a_mid = np.sqrt(alpha * prev_alpha)   # geometric mean of the bracket
+                res_mid = _solve(m_accept, a_mid)
+                chi_mid = _chi(res_mid.x)
+                if chi_mid <= chi_target:        # smoother AND still fits → prefer it
+                    m_accept, ok, chi, alpha = res_mid.x, bool(res_mid.success), chi_mid, a_mid
             break
+        prev_alpha = alpha
+    m = m_accept
 
     # Linearized appraisal from the analytic Jacobian at the accepted model (#58)
     pred_f, J_f = fwd.predict_and_jacobian(m, bird_height_m)
-    pred_use_f = np.maximum(pred_f[use], 1e-300)
-    J_data_f = w_d[:, None] * J_f[use] / pred_use_f[:, None]  # (n_use, n_layers)
+    dfac_f = _dlog_floored(pred_f[use], eps_pred)             # sign-safe (#53)
+    J_data_f = w_d[:, None] * J_f[use] * dfac_f[:, None]      # (n_use, n_layers)
 
     # DOI via column sensitivity (Christiansen & Auken 2012)
     col_sq = np.sum(J_data_f ** 2, axis=0)
@@ -300,6 +378,9 @@ def invert_line(
     inv = config["inversion"]
     noise_floor = config["system"].get("system_noise_floor", 0.0) \
         if inv.get("use_noise_floor", True) else 0.0
+    # must mirror invert_sounding's censor_factor default (#27/#59) so the
+    # reported n_gates_used matches the gates the misfit actually used
+    censor_threshold = 3.0 * noise_floor if noise_floor > 0 else 0.0
 
     if fwd is None:
         fwd = forward_from_config(config)
@@ -349,10 +430,20 @@ def invert_line(
         try:
             rho, chi, ok, doi_m, rho_sd = invert_sounding(
                 fwd, data[i], rho_initial=rho_start, **kwargs)
-            # warm-start trap guard: bad or non-converged fit from a warm
-            # start → retry cold (#15: 'not ok' also triggers)
-            if (chi > chi_retry_threshold or not ok) and warm_start \
-                    and not np.isscalar(rho_start):
+            # #62: always ALSO run the cold start and keep the better fit — not
+            # only when the warm fit trips the chi>threshold trap guard (#15).
+            # Processing order tracks flight direction (sort by fiducial), so a
+            # warm-only chain smears anomaly edges in the direction of travel and
+            # adjacent lines flown opposite ways get opposite-signed edge
+            # artifacts. Making the cold (direction-independent) start an
+            # unconditional candidate substantially reduces that hysteresis: a
+            # sounding keeps the warm result only when it strictly beats the cold
+            # one. It is not a full cure — a genuinely better warm minimum is
+            # still kept and remains direction-dependent; the real fix is LCI/SCI
+            # (Auken & Christiansen 2004), the acknowledged Phase 2 item.
+            # (chi_retry_threshold retained for API compatibility; the cold
+            # comparison no longer depends on it.)
+            if warm_start and not np.isscalar(rho_start):
                 rho2, chi2, ok2, doi_m2, rho_sd2 = invert_sounding(
                     fwd, data[i], rho_initial=inv["rho_initial"], **kwargs)
                 if chi2 < chi:
@@ -374,7 +465,12 @@ def invert_line(
             rho=rho,
             depths=depths,
             chi=chi,
-            n_gates_used=int(np.isfinite(data[i]).sum()),
+            # #59: count gates the misfit actually USED (finite AND above the
+            # censoring threshold), not merely finite — negatives and near-floor
+            # gates are finite but excluded, so the old count overstated data
+            # support and made weakly-constrained soundings look well-resolved.
+            n_gates_used=int((np.isfinite(data[i])
+                              & (data[i] > censor_threshold)).sum()),
             converged=ok,
             doi_m=doi_m,
             rho_sd=rho_sd,
