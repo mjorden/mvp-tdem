@@ -60,7 +60,7 @@ print(f"{'alpha_z':>10}  {'chi':>6}  {'converged':>10}  "
 print("-" * 58)
 
 for alpha_z in alpha_z_values:
-    rho, chi, converged = invert_sounding(
+    rho, chi, converged, doi_m, rho_sd = invert_sounding(
         fwd, d_obs, bird_height,
         noise_floor=config["system"]["system_noise_floor"],
         rho_initial=inv["rho_initial"],

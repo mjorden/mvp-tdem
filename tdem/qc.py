@@ -50,7 +50,7 @@ def run_qc(
     despike_min_gates: int = 3,
     mono_n_early: int = 8,
     mono_max_reversals: int = 1,
-    neg_early_max_ms: float = 1.0,
+    neg_early_max_ms: float = 0.2,
     neg_min_early: int = 1,
 ) -> pd.DataFrame:
     """
@@ -127,7 +127,7 @@ def _negative_gate_flag(
     df: pd.DataFrame,
     gate_cols: list[str],
     gate_times_ms: Sequence[float] | None = None,
-    early_max_ms: float = 1.0,
+    early_max_ms: float = 0.2,
     min_early: int = 1,
 ) -> pd.DataFrame:
     """
