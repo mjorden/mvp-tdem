@@ -409,8 +409,20 @@ def good_gate_array(df: pd.DataFrame) -> np.ndarray:
     gate_cols  = gate_columns(df)
     arr        = df[gate_cols].to_numpy(dtype=float).copy()
     gate_flags = [col_to_flag(c) for c in gate_cols]
+    present    = [f in df.columns for f in gate_flags]
+    # #41: a gate missing its per-gate flag AFTER run_qc (which creates one for
+    # every gate) is a flag/gate desync — silently skipping it would degrade a
+    # bad gate to "unflagged". Warn if some flags exist but not all.
+    if any(present) and not all(present):
+        missing = [f for f, p in zip(gate_flags, present) if not p]
+        warnings.warn(
+            f"[qc] good_gate_array: {len(missing)} gate(s) lack a _qc_gate_ flag "
+            f"({missing[:3]}…) — flag/gate desync; those gates are treated as "
+            "unflagged. Did run_qc() see the same gate columns?",
+            stacklevel=2,
+        )
     for i, flag in enumerate(gate_flags):
-        if flag in df.columns:
+        if present[i]:
             arr[df[flag].to_numpy(), i] = np.nan
     return arr
 

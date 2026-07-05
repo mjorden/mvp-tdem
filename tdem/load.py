@@ -56,14 +56,29 @@ def load_line(df: pd.DataFrame, line_id: int | str) -> pd.DataFrame:
     return df[mask].reset_index(drop=True)
 
 
+def _gate_index(col: str) -> int:
+    """Parse the trailing integer gate index from an sfz_* / sfz_std_* column."""
+    return int(col.rsplit("_", 1)[-1])
+
+
 def gate_columns(df: pd.DataFrame) -> list[str]:
-    """Return ordered list of sfz_* column names present in df."""
-    return sorted(c for c in df.columns if re.match(r"^sfz_\d+$", c))
+    """
+    Return sfz_* column names present in df, ordered by NUMERIC gate index (#41).
+
+    A plain `sorted()` is lexicographic: with ≥100 gates it would order
+    sfz_09, sfz_10, sfz_100, sfz_101, …, sfz_11, silently pairing gate values
+    with the wrong `gate_times_ms` entries and desyncing per-gate QC flags.
+    Real systems deliver 20–60 gates so this is hardening, but the numeric sort
+    makes the ordering correct for any gate count.
+    """
+    cols = [c for c in df.columns if re.match(r"^sfz_\d+$", c)]
+    return sorted(cols, key=_gate_index)
 
 
 def gate_std_columns(df: pd.DataFrame) -> list[str]:
-    """Return ordered list of sfz_std_* column names present in df (may be empty)."""
-    return sorted(c for c in df.columns if re.match(r"^sfz_std_\d+$", c))
+    """Return sfz_std_* column names present in df, ordered by numeric index (#41)."""
+    cols = [c for c in df.columns if re.match(r"^sfz_std_\d+$", c)]
+    return sorted(cols, key=_gate_index)
 
 
 def gate_array(df: pd.DataFrame) -> np.ndarray:
