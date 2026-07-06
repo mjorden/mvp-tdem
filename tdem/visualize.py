@@ -42,21 +42,28 @@ def plot_section(
     Stitched resistivity section for one line: distance vs elevation, colour = log10(rho).
 
     Each sounding is drawn as a column of layer cells hung from its ground
-    elevation, so topography is honoured. A chi misfit strip is drawn above
-    (chi ~ 1 = data fit to within assigned errors).
+    elevation, so topography is honoured. All cells are rendered as a SINGLE
+    PolyCollection (#20: one artist, not one pcolormesh per sounding — matters for
+    thousand-sounding lines) while keeping exact per-column hanging.
+
+    Cells below each sounding's depth of investigation are alpha-faded and a DOI
+    line is drawn (#12): the deep model there is the regularization prior bent by
+    the data, NOT a resolved result, and must not be interpreted as geology.
+
+    A chi misfit strip is drawn above (chi ~ 1 = data fit to within assigned
+    errors). The elevation axis is GPS/ellipsoid height, which differs from
+    orthometric (map / borehole-collar) elevation by the local geoid undulation.
     """
     if not result.soundings:
         raise ValueError("LineResult has no soundings to plot.")
 
+    from matplotlib.collections import PolyCollection
+    from .invert import along_line_distance, basal_depth_bottom
+
     S = result.soundings
     n = len(S)
 
-    # cumulative arc-length along the flight line
-    east = np.array([s.easting for s in S])
-    north = np.array([s.northing for s in S])
-    dx = np.diff(east, prepend=east[0])
-    dy = np.diff(north, prepend=north[0])
-    dist = np.cumsum(np.hypot(dx, dy))
+    dist = along_line_distance([s.easting for s in S], [s.northing for s in S])
 
     # column edges midway between soundings
     edges = np.empty(n + 1)
@@ -68,17 +75,22 @@ def plot_section(
         edges[:] = [dist[0] - 25.0, dist[0] + 25.0]
 
     depths = S[0].depths                      # top of each layer
-    bottom = depths[-1] * 1.4                 # nominal bottom for basal half-space cell
-    z_edges_rel = np.concatenate([depths, [bottom]])
+    z_edges_rel = np.concatenate([depths, [basal_depth_bottom(depths)]])
     if max_depth is not None:
         z_edges_rel = np.minimum(z_edges_rel, max_depth)
 
     rho = np.column_stack([s.rho for s in S])          # (n_layers, n_soundings)
     elev = np.array([s.elevation for s in S])
     chi = np.array([s.chi for s in S])
+    n_layers = len(depths)
 
-    vmin = rho_min or max(np.nanpercentile(rho, 2), 1e-2)
-    vmax = rho_max or np.nanpercentile(rho, 98)
+    # #20: an explicitly-passed rho_min/rho_max must be honoured, not treated as
+    # "unset" (the old `rho_min or …` swallowed a deliberate 0.0). The colour
+    # scale is logarithmic, so vmin is floored to a positive value — a ≤0 request
+    # is meaningless for log resistivity and would break LogNorm.
+    vmin = rho_min if rho_min is not None else max(np.nanpercentile(rho, 2), 1e-2)
+    vmax = rho_max if rho_max is not None else np.nanpercentile(rho, 98)
+    vmin = max(vmin, 1e-2)
     if vmax <= vmin:
         vmax = vmin * 10
 
@@ -87,20 +99,37 @@ def plot_section(
         gridspec_kw={"hspace": 0.06},
     )
 
-    # per-column pcolormesh so each column hangs from its own ground elevation
-    pc = None
+    # assemble every layer cell as one polygon; a single PolyCollection draws
+    # them all in one artist while each column still hangs from its own elevation
+    verts, vals = [], []
     for j in range(n):
-        xx = edges[j:j + 2]
-        zz = elev[j] - z_edges_rel                      # elevation of layer edges
-        X, Z = np.meshgrid(xx, zz)
-        pc = ax.pcolormesh(
-            X, Z, rho[:, j:j + 1],
-            norm=LogNorm(vmin=vmin, vmax=vmax), cmap=cmap, shading="flat",
-        )
+        z_top = elev[j] - z_edges_rel[:-1]
+        z_bot = elev[j] - z_edges_rel[1:]
+        for k in range(n_layers):
+            verts.append([
+                (edges[j], z_bot[k]), (edges[j + 1], z_bot[k]),
+                (edges[j + 1], z_top[k]), (edges[j], z_top[k]),
+            ])
+            vals.append(rho[k, j])
+    pc = PolyCollection(verts, array=np.array(vals),
+                        norm=LogNorm(vmin=vmin, vmax=vmax), cmap=cmap)
+    ax.add_collection(pc)
+    ax.set_ylim(float((elev - z_edges_rel[-1]).min()), float(elev.max()) + 5)
 
     ax.plot(dist, elev, color="k", lw=1.2)              # ground surface
+
+    # #12: fade below the depth of investigation and draw the DOI line
+    doi = np.array([s.doi_m if s.doi_m is not None else np.nan for s in S])
+    if np.isfinite(doi).any():
+        doi_elev = elev - doi
+        ax.fill_between(dist, doi_elev, ax.get_ylim()[0],
+                        color="white", alpha=0.55, step="mid", zorder=2.5)
+        ax.plot(dist, doi_elev, color="0.25", lw=0.9, ls=":",
+                zorder=3, label="depth of investigation")
+        ax.legend(loc="lower right", fontsize=7, framealpha=0.7)
+
     ax.set_xlabel("Distance along line (m)")
-    ax.set_ylabel("Elevation (m)")
+    ax.set_ylabel("Elevation (m, GPS/ellipsoid)")   # #20: not orthometric
     ax.set_xlim(edges[0], edges[-1])
 
     cb = fig.colorbar(pc, ax=ax, pad=0.01, aspect=30)
@@ -183,8 +212,9 @@ def plot_sounding_fit(
     ax1.legend()
     ax1.grid(True, which="both", alpha=0.3)
 
-    # stairs plot of the model
-    z = np.concatenate([depths, [depths[-1] * 1.4]])
+    # stairs plot of the model (shared basal-cell rule, #39)
+    from .invert import basal_depth_bottom
+    z = np.concatenate([depths, [basal_depth_bottom(depths)]])
     ax2.stairs(rho, z, orientation="horizontal", color="tab:blue", lw=1.5)
     ax2.set_xscale("log")
     ax2.invert_yaxis()

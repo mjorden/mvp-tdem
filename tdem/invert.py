@@ -97,38 +97,78 @@ class SoundingResult:
     rho_sd: np.ndarray | None = None    # per-layer multiplicative uncertainty (10^σ_m)
 
 
+# Basal half-space cell: the deepest layer has no lower interface in the mesh,
+# so its plotted/exported bottom is a convention. Defined once here (#39) and
+# reused by visualize.plot_section / plot_sounding_fit instead of a magic 1.4
+# duplicated across modules.
+BASAL_CELL_FACTOR = 1.4
+
+
+def basal_depth_bottom(depths: np.ndarray) -> float:
+    """Bottom depth of the basal half-space cell for a layer-top array."""
+    return float(depths[-1]) * BASAL_CELL_FACTOR
+
+
+def along_line_distance(eastings: np.ndarray, northings: np.ndarray) -> np.ndarray:
+    """Cumulative arc length along the flight line (#25/#39: one canonical rule)."""
+    east = np.asarray(eastings, dtype=float)
+    north = np.asarray(northings, dtype=float)
+    dx = np.diff(east, prepend=east[0] if len(east) else 0.0)
+    dy = np.diff(north, prepend=north[0] if len(north) else 0.0)
+    return np.cumsum(np.hypot(dx, dy))
+
+
 @dataclass
 class LineResult:
     """Stitched results for one flight line."""
     line: object
     soundings: list[SoundingResult] = field(default_factory=list)
+    # provenance so batch callers can flag bad lines without scraping stdout (#38)
+    n_qc_skipped: int = 0     # soundings skipped via sounding_mask
+    n_failed: int = 0         # soundings that raised during inversion
 
     def to_frame(self) -> pd.DataFrame:
-        """Long-format DataFrame: one row per (sounding, layer) — plot-ready."""
+        """
+        Long-format, self-describing DataFrame: one row per (sounding, layer).
+
+        Self-describing means a consumer of the CSV can reconstruct the section
+        geometry without the sidecar (#39): every layer carries both its top
+        (`depth_top`) and bottom (`depth_bottom`, basal cell included via the
+        single BASAL_CELL_FACTOR rule), `n_gates_used` for fit context, and
+        `below_doi` marking cells beneath the depth of investigation (#12).
+
+        `elev_ground` is the GROUND-surface elevation (GPS elevation − bird
+        height), NOT the sensor elevation the survey CSV calls `elevation`
+        (#37) — the two must not be confused when joining tables.
+        """
         rows = []
         for s in self.soundings:
+            n_layers = len(s.depths)
             for i, (d, r) in enumerate(zip(s.depths, s.rho)):
+                d_bot = (float(s.depths[i + 1]) if i < n_layers - 1
+                         else basal_depth_bottom(s.depths))
                 rows.append({
                     "line": s.line,
                     "fiducial": s.fiducial,
                     "easting": s.easting,
                     "northing": s.northing,
-                    "elevation": s.elevation,
+                    "elev_ground": s.elevation,   # ground surface, not sensor (#37)
                     "layer": i,
                     "depth_top": d,
+                    "depth_bottom": d_bot,
                     "rho": r,
                     "chi": s.chi,
                     "converged": s.converged,
+                    "n_gates_used": s.n_gates_used,
                     "doi_m": s.doi_m,
+                    "below_doi": (s.doi_m is not None and d >= s.doi_m),
                     "rho_sd": s.rho_sd[i] if s.rho_sd is not None else None,
                 })
         df = pd.DataFrame(rows)
         if len(self.soundings) > 1:
-            east = np.array([s.easting for s in self.soundings])
-            north = np.array([s.northing for s in self.soundings])
-            dx = np.diff(east, prepend=east[0])
-            dy = np.diff(north, prepend=north[0])
-            cum_dist = np.cumsum(np.hypot(dx, dy))
+            cum_dist = along_line_distance(
+                [s.easting for s in self.soundings],
+                [s.northing for s in self.soundings])
             n_layers = len(self.soundings[0].depths)
             df["distance"] = np.repeat(cum_dist, n_layers)
         elif len(df):
@@ -479,6 +519,10 @@ def invert_line(
         if warm_start:
             rho_start = rho  # lateral continuity: next sounding starts here
 
+    # provenance on the result so batch callers / tests don't scrape stdout (#38)
+    result.n_qc_skipped = int(skip.sum())
+    result.n_failed = n_failed
+
     if verbose:
         n_ok = len(result.soundings)
         if n_ok:
@@ -486,11 +530,11 @@ def invert_line(
             n_nc = sum(1 for s in result.soundings if not s.converged)
             print(
                 f"[invert] line {line_id}: {n_ok} soundings inverted, "
-                f"{int(skip.sum())} QC-skipped, {n_failed} failed"
+                f"{result.n_qc_skipped} QC-skipped, {n_failed} failed"
                 + (f", {n_nc} NOT CONVERGED" if n_nc else "")     # #15
                 + f" | median chi {np.median(chi_all):.2f} (1 = fit to errors)"
             )
         else:
             print(f"[invert] line {line_id}: nothing inverted "
-                  f"({int(skip.sum())} QC-skipped, {n_failed} failed)")
+                  f"({result.n_qc_skipped} QC-skipped, {n_failed} failed)")
     return result

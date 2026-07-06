@@ -244,6 +244,18 @@ def test_run_qc_returns_sounding_mask():
     assert df_qc["sounding_mask"].dtype == bool
 
 
+def test_run_qc_attaches_summary():
+    """#38: a programmatic QC summary rides on df.attrs."""
+    df = _make_sounding(n=20)
+    df.loc[3, "dem"] = 5.0     # one low-altitude flag
+    df_qc = run_qc(df, _make_config(), verbose=False)
+    s = df_qc.attrs["qc_summary"]
+    assert s["n_total"] == 20
+    assert s["n_flagged"] == int(df_qc["sounding_mask"].sum())
+    assert s["per_flag"]["_qc_alt_low"] == 1
+    assert 0.0 <= s["flagged_frac"] <= 1.0
+
+
 def test_good_soundings_excludes_flagged():
     df = _make_sounding(n=20)
     df.loc[5, "dem"] = 5.0   # too low → will be flagged

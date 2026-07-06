@@ -52,6 +52,7 @@ def run_qc(
     mono_max_reversals: int = 1,
     neg_early_max_ms: float = 0.2,
     neg_min_early: int = 1,
+    verbose: bool = True,
 ) -> pd.DataFrame:
     """
     Run the full QC suite and return df with added _qc_* columns.
@@ -75,6 +76,14 @@ def run_qc(
                          are preserved (IP / inductive limit)
     neg_min_early      : escalate the per-sounding negative flag only when at
                          least this many early gates are negative (#66.6)
+    verbose            : print the QC summary to stdout (#38). The same summary
+                         is always attached to the returned df.attrs["qc_summary"]
+                         (see qc_summary()), regardless of this flag.
+
+    Returns
+    -------
+    df with _qc_* flag columns, a combined `sounding_mask`, and a programmatic
+    summary dict in `df.attrs["qc_summary"]`.
     """
     df = df.copy()
 
@@ -94,7 +103,11 @@ def run_qc(
 
     df["sounding_mask"] = _combine_sounding_flags(df)
 
-    _print_summary(df, gate_cols)
+    # summary travels with the data (#38); prints are just a verbose view of it
+    summary = qc_summary(df)
+    df.attrs["qc_summary"] = summary
+    if verbose:
+        _print_summary(summary)
     return df
 
 
@@ -365,21 +378,42 @@ def _combine_sounding_flags(df: pd.DataFrame) -> pd.Series:
     return df[sounding_flag_cols].any(axis=1)
 
 
-def _print_summary(df: pd.DataFrame, gate_cols: list[str]) -> None:
+def qc_summary(df: pd.DataFrame) -> dict:
+    """
+    Build a programmatic QC summary (#38): counts that travel WITH the data
+    instead of only reaching stdout. Also attached to df.attrs["qc_summary"] by
+    run_qc, so batch callers can flag high-failure lines and tests can assert on
+    drop counts without capturing prints.
+    """
+    from .load import gate_columns
+    gate_cols  = gate_columns(df)
     n_total    = len(df)
-    n_bad      = df["sounding_mask"].sum()
-    gate_flags = [col_to_flag(c) for c in gate_cols]
-    gate_flags = [f for f in gate_flags if f in df.columns]
-    n_gate_bad = df[gate_flags].sum().sum() if gate_flags else 0
+    n_flagged  = int(df["sounding_mask"].sum()) if "sounding_mask" in df.columns else 0
+    gate_flags = [f for f in (col_to_flag(c) for c in gate_cols) if f in df.columns]
+    n_gate_bad = int(df[gate_flags].to_numpy().sum()) if gate_flags else 0
+    per_flag = {
+        c: int(df[c].sum())
+        for c in df.columns
+        if c.startswith("_qc_") and not c.startswith("_qc_gate_")
+    }
+    return {
+        "n_total": n_total,
+        "n_flagged": n_flagged,
+        "flagged_frac": (n_flagged / n_total) if n_total else 0.0,
+        "n_gate_below_floor": n_gate_bad,
+        "per_flag": per_flag,
+    }
 
+
+def _print_summary(summary: dict) -> None:
+    n_total, n_flagged = summary["n_total"], summary["n_flagged"]
+    frac = 100 * summary["flagged_frac"]
     print(
         f"[qc] {n_total} soundings — "
-        f"{n_bad} flagged ({100*n_bad/n_total:.1f}%) | "
-        f"{n_gate_bad} individual gate values below noise floor"
+        f"{n_flagged} flagged ({frac:.1f}%) | "
+        f"{summary['n_gate_below_floor']} individual gate values below noise floor"
     )
-    flag_cols = [c for c in df.columns if c.startswith("_qc_") and not c.startswith("_qc_gate_")]
-    for col in flag_cols:
-        n = df[col].sum()
+    for col, n in summary["per_flag"].items():
         if n > 0:
             print(f"  {col}: {n}")
 

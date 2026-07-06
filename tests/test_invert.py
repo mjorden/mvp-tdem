@@ -192,6 +192,32 @@ def test_ground_elevation_computed(fwd):
     assert result.soundings[0].elevation == pytest.approx(1450.0 - BIRD)
 
 
+def test_to_frame_self_describing(fwd):
+    """#39/#37/#12: frame carries depth_bottom, n_gates_used, below_doi, elev_ground."""
+    df = _make_line_df(fwd, [100, 50])
+    result = invert_line(df, _config(), fwd=fwd, verbose=False)
+    frame = result.to_frame()
+    for col in ("depth_bottom", "n_gates_used", "below_doi", "elev_ground"):
+        assert col in frame.columns
+    assert "elevation" not in frame.columns          # renamed to avoid sensor/ground clash
+    # every depth_bottom is strictly below its depth_top
+    assert (frame["depth_bottom"] > frame["depth_top"]).all()
+    # below_doi flips true only at/under the sounding's DOI
+    for fid in frame["fiducial"].unique():
+        sub = frame[frame["fiducial"] == fid]
+        doi = sub["doi_m"].iloc[0]
+        assert (sub["below_doi"] == (sub["depth_top"] >= doi)).all()
+
+
+def test_line_result_provenance(fwd):
+    """#38: LineResult carries QC-skip and failure counts."""
+    df = _make_line_df(fwd, [100, 100, 100])
+    df["sounding_mask"] = [False, True, False]
+    result = invert_line(df, _config(), fwd=fwd, verbose=False)
+    assert result.n_qc_skipped == 1
+    assert result.n_failed == 0
+
+
 # ---------------------------------------------------------------------------
 # Occam cooling / regularization (#10, #11, #18)
 # ---------------------------------------------------------------------------
