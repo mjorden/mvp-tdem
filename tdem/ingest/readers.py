@@ -73,6 +73,14 @@ def _read_stream(paths: list[Path], required_cols: list[str], sort_by: str) -> p
         from io import StringIO
         df = pd.read_csv(StringIO("\n".join(lines)), skipinitialspace=True,
                          on_bad_lines="skip")
+        # on_bad_lines="skip" drops malformed rows SILENTLY; count them (#68.3).
+        # Every dropped EM half-cycle mis-phases later stack windows (#56), so a
+        # silent loss is not acceptable — the first data line is the header.
+        n_expected = max(len(lines) - 1, 0)
+        n_skipped = n_expected - len(df)
+        if n_skipped > 0:
+            print(f"[readers] {path.name}: skipped {n_skipped} malformed rows "
+                  f"(wrong field count) of {n_expected}")
         missing = [c for c in required_cols if c not in df.columns]
         if missing:
             raise ValueError(f"{path.name}: missing columns {missing}; has {list(df.columns)}")

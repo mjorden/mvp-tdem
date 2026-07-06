@@ -56,9 +56,29 @@ def load_line(df: pd.DataFrame, line_id: int | str) -> pd.DataFrame:
     return df[mask].reset_index(drop=True)
 
 
+def _gate_index(col: str) -> int:
+    """Parse the trailing integer gate index from an sfz_* / sfz_std_* column."""
+    return int(col.rsplit("_", 1)[-1])
+
+
 def gate_columns(df: pd.DataFrame) -> list[str]:
-    """Return ordered list of sfz_* column names present in df."""
-    return sorted(c for c in df.columns if re.match(r"^sfz_\d+$", c))
+    """
+    Return sfz_* column names present in df, ordered by NUMERIC gate index (#41).
+
+    A plain `sorted()` is lexicographic: with ≥100 gates it would order
+    sfz_09, sfz_10, sfz_100, sfz_101, …, sfz_11, silently pairing gate values
+    with the wrong `gate_times_ms` entries and desyncing per-gate QC flags.
+    Real systems deliver 20–60 gates so this is hardening, but the numeric sort
+    makes the ordering correct for any gate count.
+    """
+    cols = [c for c in df.columns if re.match(r"^sfz_\d+$", c)]
+    return sorted(cols, key=_gate_index)
+
+
+def gate_std_columns(df: pd.DataFrame) -> list[str]:
+    """Return sfz_std_* column names present in df, ordered by numeric index (#41)."""
+    cols = [c for c in df.columns if re.match(r"^sfz_std_\d+$", c)]
+    return sorted(cols, key=_gate_index)
 
 
 def gate_array(df: pd.DataFrame) -> np.ndarray:
@@ -107,7 +127,7 @@ def _read_csv(path: Path) -> pd.DataFrame:
 
     from io import StringIO
     if not is_geosoft:
-        return pd.read_csv(StringIO("\n".join(lines)), sep=r"[\s,]+", engine="python")
+        return pd.read_csv(StringIO("\n".join(lines)), sep=",")
 
     header: list[str] | None = None
     current_line: str | None = None
@@ -174,8 +194,17 @@ def _apply_column_map(raw: pd.DataFrame, col_map: dict) -> pd.DataFrame:
     if "__geosoft_line" in df.columns:
         df["line"] = df.pop("__geosoft_line")
 
+    # sfz_n is REQUIRED (#43.2): a silent default of 30 defaulted BOTH gate
+    # extraction and the gate_times length cross-check in tandem, so an omitted
+    # sfz_n surfaced as a confusing "gate columns not found" instead of naming
+    # the real problem. prefix/format keep sensible defaults.
+    if "sfz_n" not in col_map:
+        raise ValueError(
+            "column_map.sfz_n is required (number of gate columns) and must equal "
+            "len(gate_times_ms). Add it to the sidecar's column_map."
+        )
     prefix = col_map.get("sfz_prefix", "SFz")
-    n      = col_map.get("sfz_n", 30)
+    n      = col_map["sfz_n"]
     fmt    = col_map.get("sfz_format", "bracket")
 
     gate_raw = _gate_column_names(prefix, n, fmt)
@@ -188,6 +217,17 @@ def _apply_column_map(raw: pd.DataFrame, col_map: dict) -> pd.DataFrame:
 
     for i, raw_col in enumerate(gate_raw):
         df[f"sfz_{i:02d}"] = pd.to_numeric(raw[raw_col], errors="coerce")
+
+    # drop original gate columns now duplicated by the sfz_* ones
+    df = df.drop(columns=[c for c in gate_raw if c in df.columns])
+
+    # optionally load per-gate standard-deviation columns (SFz_std[i]) if present;
+    # emit always writes them in bracket format using "{prefix}_std[i]"
+    std_raw = _gate_column_names(f"{prefix}_std", n, "bracket")
+    if all(c in raw.columns for c in std_raw):
+        for i, raw_col in enumerate(std_raw):
+            df[f"sfz_std_{i:02d}"] = pd.to_numeric(raw[raw_col], errors="coerce")
+        df = df.drop(columns=[c for c in std_raw if c in df.columns])
 
     return df
 
@@ -211,11 +251,20 @@ def _validate(df: pd.DataFrame, config: dict) -> pd.DataFrame:
         raise ValueError(f"Missing required columns after column_map: {missing}")
 
     gate_times = config.get("gate_times_ms", [])
-    n_gates    = config["column_map"].get("sfz_n", 30)
+    n_gates    = config["column_map"]["sfz_n"]   # required; validated in _apply_column_map
     if len(gate_times) != n_gates:
         raise ValueError(
             f"gate_times_ms has {len(gate_times)} entries but sfz_n = {n_gates}. "
             "These must match."
+        )
+
+    # gate times must be positive and strictly increasing (#68.5): a mis-ordered
+    # or non-positive table silently mispairs every gate with the wrong time
+    gt = np.asarray(gate_times, dtype=float)
+    if gt.size and (gt[0] <= 0 or np.any(np.diff(gt) <= 0)):
+        raise ValueError(
+            "gate_times_ms must be positive and strictly increasing (ms after "
+            f"turnoff); got {gate_times}."
         )
 
     # Gate times must fit inside the waveform off-time (#1): a bipolar square
@@ -233,6 +282,15 @@ def _validate(df: pd.DataFrame, config: dict) -> pd.DataFrame:
                 f"on_time={on_time_ms} ms). These gates are physically impossible — "
                 "fix gate_times_ms or tx_frequency_hz in the sidecar."
             )
+        # #63: the sidecar only carries gate CENTRES; a centre in the last 10%
+        # of the off-time means any realistic gate width integrates into the
+        # next turn-on ramp. Warn — the hard check above uses centres only.
+        if max(gate_times) > 0.9 * off_time_ms:
+            print(
+                f"[load] WARNING: latest gate centre ({max(gate_times)} ms) is within "
+                f"10% of the off-time end ({off_time_ms:.3f} ms) — a finite gate "
+                "window there overlaps the next turn-on ramp."
+            )
 
     return df
 
@@ -248,9 +306,9 @@ def _replace_dummies(series: pd.Series) -> pd.Series:
     vals = series.to_numpy(dtype=float)
     bad = np.abs(vals) >= _DUMMY_HUGE
     for s in _DUMMY_SENTINELS:
-        # rel tolerance catches -9999.0000001-style float dirt; sentinels are
-        # >= 1e3 in magnitude so real physics-scale data (~1e-12..1e3) is safe
-        bad |= np.isclose(vals, s, rtol=1e-6, atol=0.0)
+        # abs tolerance of 0.5 catches float-dirt like -9999.0000001 without
+        # matching real coordinates near sentinel magnitudes (e.g. northing 999,999 m)
+        bad |= np.isclose(vals, s, rtol=0.0, atol=0.5)
     return series.where(~bad)
 
 
@@ -262,6 +320,15 @@ def _clean(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     every dropped row is reported.
     """
     gate_cols = gate_columns(df)
+
+    # 0. normalize the line-id dtype (#68.4): Geosoft parsing yields STRING line
+    #    ids, a flat CSV yields ints, so load_line(df, 2000) failed on Geosoft
+    #    files with a confusing "not found". If every id is integer-valued, store
+    #    as int; otherwise leave the (string) ids untouched.
+    if "line" in df.columns:
+        line_num = pd.to_numeric(df["line"], errors="coerce")
+        if line_num.notna().all() and np.all(line_num == np.round(line_num)):
+            df["line"] = line_num.astype("int64")
 
     # 1. coerce every non-id column to numeric ('*' and junk → NaN)
     numeric_cols = [c for c in df.columns if c not in ("line", "fiducial")]

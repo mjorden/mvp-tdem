@@ -44,11 +44,15 @@ def main(csv_path, config_path, line_id, all_lines, out_dir):
     if all_lines:
         line_ids = sorted(df["line"].unique())
     else:
-        # match type: line ids in the CSV are usually ints
-        try:
-            line_id = int(line_id)
-        except ValueError:
-            pass
+        # coerce to int only when the frame's line IDs are integer-typed
+        if "line" in df.columns:
+            available = df["line"].unique()
+            try:
+                coerced = int(line_id)
+                if coerced in available:
+                    line_id = coerced
+            except (ValueError, TypeError):
+                pass
         line_ids = [line_id]
 
     for lid in line_ids:

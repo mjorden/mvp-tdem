@@ -5,7 +5,9 @@ import pandas as pd
 import pytest
 
 from tdem.forward import TDEMForward, layer_thicknesses
-from tdem.invert import invert_sounding, invert_line, LineResult
+from tdem.invert import (
+    invert_sounding, invert_line, LineResult, _log_floored, _dlog_floored,
+)
 
 GATE_TIMES_MS = [0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 3.2, 6.4]
 N_LAYERS = 8
@@ -25,21 +27,26 @@ def test_recover_halfspace(fwd):
     """Noise-free half-space data should invert back to ~the true resistivity."""
     rho_true = 50.0
     d_obs = fwd.predict(np.full(N_LAYERS, rho_true), BIRD)
-    rho, chi, ok = invert_sounding(fwd, d_obs, BIRD, rho_initial=200.0, max_iter=40)
+    rho, chi, ok, doi_m, rho_sd = invert_sounding(fwd, d_obs, BIRD, rho_initial=200.0, max_iter=40)
     assert ok
     assert chi < 1.0  # noise-free data must fit to well within assigned errors
     # TDEM equivalence: resistive structure is weakly resolved, so allow a
     # generous factor-3 band around the geometric mean rather than exact recovery
     gm = 10 ** np.mean(np.log10(rho))
     assert rho_true / 3 < gm < rho_true * 3, f"recovered {gm:.1f} vs true {rho_true}"
+    # DOI must be a finite positive depth (can reach depth_max for noise-free data)
+    assert doi_m > 0
+    # rho_sd must be per-layer multiplicative factors >= 1
+    assert rho_sd.shape == rho.shape
+    assert np.all(rho_sd >= 1.0)
 
 
 def test_conductor_detected(fwd):
     """Two-decade contrast: conductive earth inverts more conductive than resistive earth."""
     d_cond = fwd.predict(np.full(N_LAYERS, 10.0), BIRD)
     d_res = fwd.predict(np.full(N_LAYERS, 1000.0), BIRD)
-    rho_c, _, _ = invert_sounding(fwd, d_cond, BIRD)
-    rho_r, _, _ = invert_sounding(fwd, d_res, BIRD)
+    rho_c, *_ = invert_sounding(fwd, d_cond, BIRD)
+    rho_r, *_ = invert_sounding(fwd, d_res, BIRD)
     # conductors are well resolved by TDEM; resistors suffer equivalence —
     # require clear separation (factor 3+) rather than the full 100x contrast
     assert np.median(rho_c) < np.median(rho_r) / 3
@@ -49,7 +56,7 @@ def test_nan_gates_excluded(fwd):
     """Masked gates shouldn't break the inversion."""
     d_obs = fwd.predict(np.full(N_LAYERS, 100.0), BIRD)
     d_obs[5:] = np.nan  # keep only 5 early gates
-    rho, chi, ok = invert_sounding(fwd, d_obs, BIRD)
+    rho, chi, ok, *_ = invert_sounding(fwd, d_obs, BIRD)
     assert np.all(np.isfinite(rho))
 
 
@@ -62,9 +69,46 @@ def test_too_few_gates_raises(fwd):
 
 def test_bounds_respected(fwd):
     d_obs = fwd.predict(np.full(N_LAYERS, 5.0), BIRD)
-    rho, _, _ = invert_sounding(fwd, d_obs, BIRD, rho_min=20.0, rho_max=500.0)
+    rho, *_ = invert_sounding(fwd, d_obs, BIRD, rho_min=20.0, rho_max=500.0)
     assert np.all(rho >= 20.0 - 1e-6)
     assert np.all(rho <= 500.0 + 1e-6)
+
+
+# ---------------------------------------------------------------------------
+# #53: sign-safe log transform (no zero-gradient cliff on negative predictions)
+# ---------------------------------------------------------------------------
+
+def test_log_floored_matches_log_well_above_eps():
+    x = np.array([1e-9, 1e-6, 1e-3])
+    eps = 1e-3 * x
+    assert np.allclose(_log_floored(x, eps), np.log(x))
+
+
+def test_log_floored_is_c1_continuous_at_eps():
+    eps = np.array([1e-9])
+    # value continuity: both branches meet at x == eps
+    assert np.isclose(_log_floored(eps, eps)[0], np.log(eps)[0])
+    # slope continuity: derivative is 1/eps on both sides of eps
+    assert np.isclose(_dlog_floored(eps, eps)[0], 1.0 / eps[0])
+
+
+def test_dlog_floored_nonzero_gradient_for_negative_pred():
+    """The core of #53: a non-positive prediction must NOT give zero gradient."""
+    eps = np.array([1e-9, 1e-9])
+    x = np.array([-3e-9, 0.0])          # negative / zero prediction
+    g = _dlog_floored(x, eps)
+    assert np.all(g == 1.0 / eps)       # finite, large, positive — pushes pred up
+    assert np.all(g > 0)
+
+
+def test_negative_gate_excluded_from_gate_count(fwd):
+    """#59: n_gates_used counts USED gates (finite & positive), not merely finite."""
+    d = fwd.predict(np.full(N_LAYERS, 100.0), BIRD)
+    df = _make_line_df(fwd, [100.0])
+    gcols = [f"sfz_{k:02d}" for k in range(N_LAYERS)]
+    df.loc[0, gcols[-1]] = -abs(d[-1])          # one finite-but-negative gate
+    result = invert_line(df, _config(), fwd=fwd, verbose=False)
+    assert result.soundings[0].n_gates_used == N_LAYERS - 1
 
 
 # ---------------------------------------------------------------------------
@@ -129,9 +173,16 @@ def test_to_frame_layout(fwd):
     result = invert_line(df, _config(), fwd=fwd, verbose=False)
     frame = result.to_frame()
     assert len(frame) == 2 * N_LAYERS
-    assert {"distance", "depth_top", "rho", "chi"} <= set(frame.columns)
+    assert {"distance", "depth_top", "rho", "chi", "doi_m", "rho_sd"} <= set(frame.columns)
     # second sounding is 50 m along the line
     assert frame[frame["fiducial"] == 1001]["distance"].iloc[0] == pytest.approx(50.0)
+    # doi_m is constant per sounding (repeated across layers)
+    for fid in frame["fiducial"].unique():
+        sub = frame[frame["fiducial"] == fid]
+        assert sub["doi_m"].nunique() == 1
+        assert (sub["doi_m"] > 0).all()
+    # rho_sd values are per-layer multiplicative factors >= 1
+    assert (frame["rho_sd"] >= 1.0).all()
 
 
 def test_ground_elevation_computed(fwd):
@@ -139,6 +190,32 @@ def test_ground_elevation_computed(fwd):
     result = invert_line(df, _config(), fwd=fwd, verbose=False)
     # ground = GPS elevation - bird height
     assert result.soundings[0].elevation == pytest.approx(1450.0 - BIRD)
+
+
+def test_to_frame_self_describing(fwd):
+    """#39/#37/#12: frame carries depth_bottom, n_gates_used, below_doi, elev_ground."""
+    df = _make_line_df(fwd, [100, 50])
+    result = invert_line(df, _config(), fwd=fwd, verbose=False)
+    frame = result.to_frame()
+    for col in ("depth_bottom", "n_gates_used", "below_doi", "elev_ground"):
+        assert col in frame.columns
+    assert "elevation" not in frame.columns          # renamed to avoid sensor/ground clash
+    # every depth_bottom is strictly below its depth_top
+    assert (frame["depth_bottom"] > frame["depth_top"]).all()
+    # below_doi flips true only at/under the sounding's DOI
+    for fid in frame["fiducial"].unique():
+        sub = frame[frame["fiducial"] == fid]
+        doi = sub["doi_m"].iloc[0]
+        assert (sub["below_doi"] == (sub["depth_top"] >= doi)).all()
+
+
+def test_line_result_provenance(fwd):
+    """#38: LineResult carries QC-skip and failure counts."""
+    df = _make_line_df(fwd, [100, 100, 100])
+    df["sounding_mask"] = [False, True, False]
+    result = invert_line(df, _config(), fwd=fwd, verbose=False)
+    assert result.n_qc_skipped == 1
+    assert result.n_failed == 0
 
 
 # ---------------------------------------------------------------------------
@@ -150,8 +227,8 @@ def test_cooling_stops_at_smoothest_fitting_model(fwd):
     rng = np.random.default_rng(7)
     d_true = fwd.predict(np.full(N_LAYERS, 100.0), BIRD)
     d_obs = d_true * (1 + 0.05 * rng.standard_normal(len(d_true)))
-    rho, chi, ok = invert_sounding(fwd, d_obs, BIRD, rel_error=0.05,
-                                   chi_target=1.0, max_iter=40)
+    rho, chi, ok, *_ = invert_sounding(fwd, d_obs, BIRD, rel_error=0.05,
+                                       chi_target=1.0, max_iter=40)
     # cooling accepts the FIRST (smoothest) stage reaching target — chi should
     # land near 1, not grossly below (which would mean fitting noise)
     assert chi <= 1.0
@@ -162,12 +239,12 @@ def test_reference_model_decoupled_from_start(fwd):
     """#18: rho_ref pins the damping target; warm start must not change the objective."""
     d_obs = fwd.predict(np.full(N_LAYERS, 100.0), BIRD)
     weird_start = np.full(N_LAYERS, 3000.0)
-    rho_a, chi_a, _ = invert_sounding(fwd, d_obs, BIRD,
-                                      rho_initial=weird_start, rho_ref=100.0,
-                                      max_iter=40)
-    rho_b, chi_b, _ = invert_sounding(fwd, d_obs, BIRD,
-                                      rho_initial=100.0, rho_ref=100.0,
-                                      max_iter=40)
+    rho_a, chi_a, *_ = invert_sounding(fwd, d_obs, BIRD,
+                                       rho_initial=weird_start, rho_ref=100.0,
+                                       max_iter=40)
+    rho_b, chi_b, *_ = invert_sounding(fwd, d_obs, BIRD,
+                                       rho_initial=100.0, rho_ref=100.0,
+                                       max_iter=40)
     # same objective → both should fit; recovered models comparable in the
     # well-resolved shallow half
     assert chi_a <= 1.0 and chi_b <= 1.0

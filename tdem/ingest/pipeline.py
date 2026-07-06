@@ -34,13 +34,16 @@ def ingest_flight(flight_dir: str | Path, instrument: dict, survey_cfg: dict) ->
     """
     flight_dir = Path(flight_dir)
     ing   = survey_cfg.get("ingest", {})
-    n_stack   = ing.get("n_stack", 25)
+    n_stack   = ing.get("n_stack", 24)
     trim_frac = ing.get("trim_frac", 0.1)
     max_gap_s = ing.get("max_gap_s", 2.0)
 
+    import warnings
+
     paths = readers.discover_flight(flight_dir)
 
-    clock = fit_clock(readers.read_sync(paths["sync"]),
+    sync_df = readers.read_sync(paths["sync"])
+    clock = fit_clock(sync_df,
                       max_residual_ms=instrument.get("clock", {}).get("max_residual_ms", 1.0))
 
     em  = apply_clock(readers.read_em(paths["em"]), clock)
@@ -49,6 +52,19 @@ def ingest_flight(flight_dir: str | Path, instrument: dict, survey_cfg: dict) ->
     txcur = (apply_clock(readers.read_txcur(paths["txcur"]), clock)
              if paths["txcur"] else None)
     lines_df = readers.read_lines(paths["lines"]) if paths["lines"] else None
+
+    # GPS-vs-UTC leap-second diagnostic (#64): if the sync log and GPS position
+    # log disagree by ~18–19 s their time standards differ (GPS ≠ UTC).
+    if "t_utc" in gps.columns:
+        dt = sync_df["t_utc"].median() - gps["t_utc"].median()
+        if 14.0 <= abs(dt) <= 22.0:
+            warnings.warn(
+                f"[timesync] Sync stream and GPS position stream differ by "
+                f"{dt:+.1f} s — possible GPS/UTC leap-second mismatch "
+                f"(current offset is ~18 s).  Verify both streams use the "
+                "same time standard or ~540 m position errors will result.",
+                stacklevel=2,
+            )
 
     df = stack_and_locate(em, gps, alt, txcur, lines_df, instrument, survey_cfg,
                           n_stack=n_stack, trim_frac=trim_frac, max_gap_s=max_gap_s)
@@ -59,9 +75,12 @@ def ingest_flight(flight_dir: str | Path, instrument: dict, survey_cfg: dict) ->
         "n_soundings": len(df),
         "n_stack": n_stack,
         "trim_frac": trim_frac,
-        "time_sync": {"mode": "gps_messages", "rate": clock.rate,
-                      "max_residual_ms": clock.max_residual_s * 1000,
-                      "n_pairs": clock.n_pairs},
+        "time_sync": {
+            "mode": "gps_messages",
+            "model": "piecewise_linear",
+            "max_residual_ms": clock.max_residual_s * 1000,
+            "n_pairs": clock.n_pairs,
+        },
         "moment": df.attrs["moment_mode"],
         "line_assignment": "operator_log" if lines_df is not None else "heading_auto",
     }
@@ -73,8 +92,12 @@ def stack_and_locate(em, gps, alt, txcur, lines_df, instrument, survey_cfg,
     """The format-agnostic core: time-synced frames in, located soundings out."""
     from .stack import stack_soundings
 
-    df = stack_soundings(em, n_stack=n_stack, trim_frac=trim_frac)
-    df, moment_mode = calibrate(df, instrument, txcur, max_gap_s=max_gap_s)
+    f_tx = instrument["tx"].get("frequency_hz")
+    df = stack_soundings(em, n_stack=n_stack, trim_frac=trim_frac, tx_frequency_hz=f_tx)
+    # stack window spans n_stack half-cycles → n_stack/(2·f) seconds; averaging the
+    # Tx current over it de-aliases a slow monitor (#65.1)
+    window_s = n_stack / (2.0 * f_tx) if f_tx else 0.0
+    df, moment_mode = calibrate(df, instrument, txcur, max_gap_s=max_gap_s, window_s=window_s)
     df = merge_nav(df, gps, alt, max_gap_s=max_gap_s)
     df = project(df, epsg=survey_cfg["survey"]["epsg"])
     df = elevations(df, geoid_offset_m=survey_cfg["survey"].get("geoid_offset_m", 0.0))
@@ -105,8 +128,27 @@ def ingest_survey(
 
     provenance = {
         "ingest_version": "0.1",
+        "git_commit": _git_commit(),                       # #67.3
+        # hash the configs, not just their paths (#67.1): the sidecar physics
+        # block is GENERATED from instrument.yaml, so an after-the-fact yaml edit
+        # would otherwise be undetectable
         "instrument_config": str(instrument_path),
+        "instrument_config_sha256": file_digest(instrument_path),
         "survey_config": str(survey_path),
+        "survey_config_sha256": file_digest(survey_path),
         "flights": flights_prov,
     }
     return emit_survey(df, instrument, survey_cfg, out_csv, out_config, provenance)
+
+
+def _git_commit() -> str | None:
+    """Best-effort short git commit for provenance (#67.3); None if unavailable."""
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(Path(__file__).parent), "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return out.stdout.strip() or None if out.returncode == 0 else None
+    except Exception:
+        return None

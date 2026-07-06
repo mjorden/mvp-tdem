@@ -42,7 +42,10 @@ d_clean = fwd.predict(rho_true, bird_height)
 d_obs = np.maximum(d_clean * (1 + rng.normal(0, 0.03, size=len(d_clean))), 1e-16)
 
 # --- Invert ------------------------------------------------------------------
-rho, rms, converged = invert_sounding(
+# invert_sounding returns (rho, chi, converged, doi_m, rho_sd): chi is the
+# error-normalized misfit (chi ~ 1 = fit to assigned errors), doi_m the depth of
+# investigation, rho_sd per-layer multiplicative uncertainty (#58).
+rho, chi, converged, doi_m, rho_sd = invert_sounding(
     fwd, d_obs, bird_height,
     noise_floor=config["system"]["system_noise_floor"],
     rho_initial=inv["rho_initial"],
@@ -52,14 +55,14 @@ rho, rms, converged = invert_sounding(
     alpha_z=inv["alpha_z"],   # vertical smoothing — raise for blockier-to-smoother models
     max_iter=inv["max_iter"],
 )
-print(f"converged={converged}, log-space RMS={rms:.3f}")
+print(f"converged={converged}, chi={chi:.3f} (1 = fit to errors), DOI≈{doi_m:.0f} m")
 
 # --- Compare recovered vs. true ----------------------------------------------
 d_pred = fwd.predict(rho, bird_height)
 fig = plot_sounding_fit(
     d_obs, d_pred, config["gate_times_ms"], rho, layer_depths(fwd.thicknesses),
     OUT / "single_sounding_fit.png",
-    title=f"Synthetic sounding — RMS {rms:.3f}",
+    title=f"Synthetic sounding — chi {chi:.3f}",
 )
 
 in_body = (z >= 20) & (z <= 80)

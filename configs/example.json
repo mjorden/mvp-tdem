@@ -21,7 +21,7 @@
     "sfz_prefix": "SFz",
     "sfz_n":      20,
     "sfz_format": "bracket",
-    "_sfz_format_note": "'bracket' → SFz[0]..SFz[29]; 'underscore' → SFz_00..SFz_29; 'zero_padded' → SFz00..SFz29"
+    "_sfz_format_note": "sfz_n gate columns → indices 0..sfz_n-1 (here 0..19). 'bracket' → SFz[0]..SFz[19]; 'underscore' → SFz_00..SFz_19; 'zero_padded' → SFz00..SFz19. sfz_n is REQUIRED and must equal len(gate_times_ms)."
   },
 
   "system": {
@@ -29,6 +29,8 @@
     "tx_frequency_hz":          25,
     "tx_waveform":              "bipolar_square",
     "tx_on_time_us":            4000,
+    "tx_ramp_off_us":           800,
+    "_waveform_note":           "on_time includes both ramps; gate times are referenced to the END of the turn-off ramp. bipolar_square + frequency + on_time makes the forward model the full pulse train (#22); ramp_off the finite turn-off (#52).",
     "rx_coil_area_m2":          99.7,
     "tx_geometry":              "concentric_loop",
     "tx_loop_radius_m":         13.0,
@@ -36,7 +38,7 @@
     "rx_orientation":           "Z",
     "system_noise_floor":       1e-12,
     "_geometry_note":           "concentric_loop (VTEM-style, Rx at loop centre) or offset_dipole (+ tx_rx_separation_m)",
-    "_noise_units":             "V/(A·m⁴) — same units as gate data; per-gate floor when std columns absent"
+    "_noise_units":             "V/(A·m⁴) — same units as gate data; used as absolute error floor in quadrature with rel_error and per-gate SFz_std columns when present"
   },
 
   "gate_times_ms": [
@@ -44,12 +46,14 @@
     0.1312, 0.1944, 0.2880, 0.4268, 0.6320, 0.9360, 1.3860,
     2.0524, 3.0400, 4.5012, 6.6680, 9.8760, 14.624
   ],
-  "_gate_times_note": "Gate-centre times in ms after turnoff. Length must equal sfz_n, and the last gate must fit inside the off-time: 1/(2·f) − on_time = 16 ms at 25 Hz / 4 ms on-time.",
+  "_gate_times_note": "Gate-CENTRE times in ms after turnoff. Length must equal sfz_n, and the last gate must fit inside the off-time: 1/(2·f) − on_time = 16 ms at 25 Hz / 4 ms on-time.",
+  "_gate_window_note": "The forward evaluates the gate-centre instant only; real receivers integrate over a finite window. For contiguous log-spaced windows at this spacing the bias is ~1% (window-average/centre ≈ 1.008 at a late-time p=2.5 slope). The schema has no gate_start_ms/gate_end_ms fields, so delivered VTEM/SkyTEM window tables cannot yet be integrated over — the centre-point approximation is silent and unquantifiable per survey (#44).",
 
   "inversion": {
-    "n_layers":        30,
+    "n_layers":        36,
     "depth_min_m":     0.5,
-    "depth_max_m":     300,
+    "depth_max_m":     600,
+    "_mesh_note":      "depth_max ~1.5x estimated DOI (#63): diffusion depth at the 14.6 ms gate is ~480 m even at 10 ohm-m, so a 300 m mesh aliased the last ~5 gates into the basal half-space. 36 layers keeps ~11 interfaces/decade.",
     "rho_initial":     100,
     "rho_min":         1,
     "rho_max":         10000,

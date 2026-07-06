@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from tdem.load import _clean, _read_csv, _validate, load_survey
+from tdem.load import _apply_column_map, _clean, _read_csv, _validate, load_survey
 
 
 def _df():
@@ -42,6 +42,23 @@ def test_gate_count_mismatch_rejected():
 def test_no_frequency_skips_offtime_check():
     cfg = _config([0.1, 743.0], f=None)
     _validate(_df(), cfg)  # no tx_frequency_hz → can't check, don't crash
+
+
+def test_missing_sfz_n_raises_clear_error():
+    """#43.2: an omitted sfz_n must name the real problem, not default to 30."""
+    with pytest.raises(ValueError, match="sfz_n is required"):
+        _apply_column_map(pd.DataFrame({"E": [1.0]}), {"easting": "E"})
+
+
+def test_non_monotonic_gate_times_rejected():
+    """#68.5: a mis-ordered gate-time table mispairs every gate → hard error."""
+    with pytest.raises(ValueError, match="strictly increasing"):
+        _validate(_df(), _config([0.1, 0.4, 0.2, 1.0]))
+
+
+def test_nonpositive_gate_times_rejected():
+    with pytest.raises(ValueError, match="strictly increasing"):
+        _validate(_df(), _config([0.0, 0.4, 1.0]))
 
 
 # ---------------------------------------------------------------------------
@@ -96,8 +113,9 @@ def test_geosoft_star_dummy_coerced(tmp_path):
     # '*' elevation row survives load (dem is fine) with elevation NaN — no crash (#8)
     assert len(df) == 5
     assert df["elevation"].isna().sum() == 1
-    # line ids came from the separator records
-    assert set(df["line"]) == {"1000", "2000", "9000"}
+    # line ids came from the separator records, normalized to int so a Geosoft
+    # file and a flat CSV both answer load_line(df, 2000) (#68.4)
+    assert set(df["line"]) == {1000, 2000, 9000}
 
 
 def test_flat_csv_still_works(tmp_path):

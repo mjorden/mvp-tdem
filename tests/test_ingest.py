@@ -26,10 +26,11 @@ def _sync_df(offset=T0, rate=1 + 2e-6, n=120, jitter=0.0, seed=0):
 
 def test_fit_clock_recovers_offset_and_drift():
     m = fit_clock(_sync_df())
-    # 0.1 ms on the offset: an order below the residual spec, and above
-    # float64 quantization at unix-epoch magnitudes
-    assert m.offset_s == pytest.approx(T0, abs=1e-4)
-    assert m.rate == pytest.approx(1 + 2e-6, abs=1e-9)
+    # piecewise model passes through knots; verify to_utc is accurate within
+    # the sync range (sync df has t_rx in 500..619 with rate 1+2e-6)
+    t_test = np.array([510.0, 560.0, 610.0])
+    expected = T0 + (1 + 2e-6) * t_test
+    assert np.allclose(m.to_utc(t_test), expected, atol=1e-6)
 
 
 def test_fit_clock_tolerates_jitter_within_spec():
@@ -37,10 +38,21 @@ def test_fit_clock_tolerates_jitter_within_spec():
     assert m.max_residual_s < 1e-3
 
 
-def test_fit_clock_rejects_bad_sync_stream():
+def test_fit_clock_rejects_single_outlier_transparently():
+    """A single garbled message must be silently rejected, not abort (#64)."""
+    import warnings
     df = _sync_df()
-    df.loc[50, "t_utc"] += 0.5  # a garbled time message
-    with pytest.raises(ValueError, match="residual"):
+    df.loc[50, "t_utc"] += 0.5  # one garbled message among 120 good pairs
+    with warnings.catch_warnings(record=True):
+        m = fit_clock(df)  # must NOT raise
+    assert m.n_pairs == 119   # one pair rejected
+
+
+def test_fit_clock_rejects_bad_sync_stream():
+    """Too many outliers (> default 20%) must still error (#64)."""
+    df = _sync_df()
+    df.loc[30:60, "t_utc"] += 0.5  # 31/120 ≈ 26% garbled
+    with pytest.raises(ValueError, match="outlier"):
         fit_clock(df)
 
 
@@ -50,9 +62,12 @@ def test_fit_clock_needs_two_pairs():
 
 
 def test_apply_clock():
-    m = ClockModel(offset_s=T0, rate=1.0, max_residual_s=0, n_pairs=2)
+    import numpy as np
+    t_rx = np.array([0.0, 100.0])
+    m = ClockModel(t_rx_knots=t_rx, t_utc_knots=T0 + t_rx,
+                   max_residual_s=0.0, n_pairs=2)
     out = apply_clock(pd.DataFrame({"t_rx": [1.0, 2.0]}), m)
-    assert list(out["t_utc"]) == [T0 + 1.0, T0 + 2.0]
+    assert out["t_utc"].tolist() == pytest.approx([T0 + 1.0, T0 + 2.0])
 
 
 # ---------------------------------------------------------------------------
@@ -70,33 +85,51 @@ def _em_df(n_hc=50, n_gates=3, value=10.0):
 
 def test_stack_polarity_alignment():
     """Alternating-sign raw values must stack to the positive response."""
-    out = stack_soundings(_em_df(), n_stack=25)
+    out = stack_soundings(_em_df(), n_stack=24)
     assert len(out) == 2
+    assert np.allclose(out[["gate_00", "gate_01", "gate_02"]], 10.0)
+
+
+def test_stack_rejects_odd_n_stack():
+    """#56: odd n_stack cannot balance +/- half-cycles → DC leak; must error."""
+    with pytest.raises(ValueError, match="EVEN"):
+        stack_soundings(_em_df(), n_stack=25)
+
+
+def test_stack_pair_differencing_cancels_dc_offset():
+    """#56: a constant receiver DC offset b must cancel exactly via pairing."""
+    df = _em_df()
+    b = 3.0                                   # additive DC on every half-cycle
+    for c in ["g00", "g01", "g02"]:
+        df[c] = df[c] + b
+    out = stack_soundings(df, n_stack=24)
     assert np.allclose(out[["gate_00", "gate_01", "gate_02"]], 10.0)
 
 
 def test_stack_trimmed_mean_rejects_spike():
     df = _em_df()
     df.loc[3, ["g00", "g01", "g02"]] *= 20  # sferic hit on one half-cycle
-    out = stack_soundings(df, n_stack=25, trim_frac=0.1)
+    out = stack_soundings(df, n_stack=24, trim_frac=0.1)
     assert np.allclose(out.loc[0, ["gate_00", "gate_01", "gate_02"]], 10.0)
 
 
 def test_stack_keeps_spread_and_drops_partial_window():
-    out = stack_soundings(_em_df(n_hc=60), n_stack=25)  # 60 = 2 full + 10
+    out = stack_soundings(_em_df(n_hc=60), n_stack=24)  # 60 = 2 full + 12
     assert len(out) == 2
     assert "gate_std_00" in out.columns
-    assert (out["n_used"] == 25).all()
+    assert (out["n_used"] == 24).all()
 
 
-def test_stack_timestamp_is_window_centre():
-    out = stack_soundings(_em_df(), n_stack=25)
-    assert out.loc[0, "t_utc"] == pytest.approx(T0 + np.mean(np.arange(25)) / 50)
+def test_stack_timestamp_centre_with_half_cycle_offset():
+    """#68.2: logged stamps are half-cycle STARTS; centre adds 0.5/(2·f)."""
+    out = stack_soundings(_em_df(), n_stack=24, tx_frequency_hz=25.0)
+    expected = T0 + np.mean(np.arange(24)) / 50 + 0.5 / (2 * 25.0)
+    assert out.loc[0, "t_utc"] == pytest.approx(expected)
 
 
 def test_stack_requires_t_utc():
     with pytest.raises(ValueError, match="t_utc"):
-        stack_soundings(_em_df().drop(columns="t_utc"), n_stack=25)
+        stack_soundings(_em_df().drop(columns="t_utc"), n_stack=24)
 
 
 # ---------------------------------------------------------------------------
@@ -134,8 +167,36 @@ def test_calibrate_measured_moment():
 def test_calibrate_falls_back_to_nominal_current_in_gaps():
     txcur = pd.DataFrame({"t_utc": [T0 + 100, T0 + 101], "current_a": [220.0, 220.0]})
     out, mode = calibrate(_stacked(), _INSTRUMENT, txcur_df=txcur)  # sounding outside range
-    assert mode == "measured"
+    assert mode == "measured_with_gaps"
     assert out.loc[0, "gate_00"] == pytest.approx(1e-3)
+
+
+def test_calibrate_rejects_signed_bipolar_current():
+    """#65.2: a non-positive current means a signed monitor log — hard error."""
+    txcur = pd.DataFrame({"t_utc": [T0 - 1, T0 + 1], "current_a": [220.0, -220.0]})
+    with pytest.raises(ValueError, match="non-positive"):
+        calibrate(_stacked(), _INSTRUMENT, txcur_df=txcur)
+
+
+def test_calibrate_warns_current_far_from_nominal():
+    """#65.2: current well outside ±20% of nominal warns but proceeds."""
+    import warnings
+    txcur = pd.DataFrame({"t_utc": [T0 - 1, T0 + 1], "current_a": [400.0, 400.0]})  # 2× nominal
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        calibrate(_stacked(), _INSTRUMENT, txcur_df=txcur)
+    assert any("nominal" in str(x.message) for x in w)
+
+
+def test_calibrate_window_average_de_aliases_current():
+    """#65.1: with window_s set, current is averaged over the window, not sampled once."""
+    # an early sag to 170 A that a centre-instant sample (which would read ~210
+    # between the two neighbours) misses entirely; the window mean is 200 A
+    txcur = pd.DataFrame({"t_utc": [T0 - 0.2, T0 - 0.1, T0 + 0.1, T0 + 0.2],
+                          "current_a": [170.0, 210.0, 210.0, 210.0]})
+    out, _ = calibrate(_stacked(), _INSTRUMENT, txcur_df=txcur, window_s=0.48)
+    # window mean = (170+210+210+210)/4 = 200 A = nominal → gate 1e-3
+    assert out.loc[0, "gate_00"] == pytest.approx(1e-3, rel=1e-6)
 
 
 # ---------------------------------------------------------------------------
