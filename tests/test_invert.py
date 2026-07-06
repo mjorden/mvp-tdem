@@ -235,6 +235,20 @@ def test_cooling_stops_at_smoothest_fitting_model(fwd):
     assert chi > 0.2, f"chi={chi:.2f} — suspiciously overfit despite cooling"
 
 
+def test_unreachable_chi_target_returns_solved_model_not_prior(fwd):
+    """Regression: when no cooling stage reaches chi_target, return the roughest
+    SOLVED model with its real chi — never rho_initial verbatim (prior-as-result)."""
+    d_obs = fwd.predict(np.full(N_LAYERS, 5.0), BIRD)   # true 5 ohm-m conductor
+    rho, chi, ok, *_ = invert_sounding(
+        fwd, d_obs, BIRD, rho_initial=100.0, chi_target=1e-9, max_iter=40)
+    assert not np.allclose(rho, 100.0), "must not return the rho_initial prior"
+    assert np.median(rho) < 20.0, "must recover the conductor, not the 100 ohm-m start"
+    # reported chi must correspond to the returned model, not a stale value
+    assert chi == pytest.approx(
+        float(np.sqrt(np.mean(((np.log(np.maximum(fwd.predict(rho, BIRD), 1e-300))
+                                - np.log(d_obs)) / 0.05) ** 2))), rel=0.05)
+
+
 def test_reference_model_decoupled_from_start(fwd):
     """#18: rho_ref pins the damping target; warm start must not change the objective."""
     d_obs = fwd.predict(np.full(N_LAYERS, 100.0), BIRD)
