@@ -347,8 +347,12 @@ def invert_sounding(
         result = _solve(m, alpha)
         m, ok = result.x, bool(result.success)
         chi = _chi(m)
+        # always keep the latest SOLVED model: if no α ever reaches chi_target the
+        # roughest solved model is returned with its matching chi (an honest
+        # underfit), NOT the untouched initial model — returning rho_initial with
+        # a stale chi would display the prior as a result for hard-to-fit soundings.
+        m_accept = m
         if chi <= chi_target:
-            m_accept = m
             if prev_alpha is not None:          # bisect toward the smoother side (#60.1)
                 a_mid = np.sqrt(alpha * prev_alpha)   # geometric mean of the bracket
                 res_mid = _solve(m_accept, a_mid)
