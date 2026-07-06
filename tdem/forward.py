@@ -206,11 +206,19 @@ class TDEMForward:
         self._eval_times, inverse = np.unique(t_flat, return_inverse=True)
         self._eval_inverse = inverse.reshape(t_flat.shape)
 
+    _SIM_CACHE_MAX = 512   # bound the per-height cache (#68.7)
+
     def _build_simulation(self, bird_height_m: float) -> tdem.Simulation1DLayered:
         """Construct (and cache) a simulation for one bird height (rounded to 0.1 m)."""
         key = round(bird_height_m, 1)
         if key in self._sim_cache:
             return self._sim_cache[key]
+        # continuous 20–90 m altimetry at 0.1 m rounding is ~700 distinct sims
+        # (#68.7); cap the cache so a long survey can't grow it without bound.
+        # Soundings are processed in flight order, so the oldest heights are the
+        # least likely to recur — drop the oldest inserted key (FIFO).
+        if len(self._sim_cache) >= self._SIM_CACHE_MAX:
+            self._sim_cache.pop(next(iter(self._sim_cache)))
 
         # superposition mode (#22, #52) needs s(t) at every quadrature node;
         # DLF cost is nearly independent of the number of output times

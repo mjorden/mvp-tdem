@@ -114,6 +114,11 @@ def build_sidecar(instrument: dict, survey_cfg: dict, n_gates: int, provenance: 
         },
         "system": {
             "tx_moment_am2":      tx["moment_nominal_am2"],
+            "_tx_moment_note":    ("NOMINAL by definition — the gate data are "
+                                   "already moment-normalized to V/(A·m⁴), by the "
+                                   "measured per-sounding current when a Tx-current "
+                                   "log was present (see ingest.moment). This field "
+                                   "is informational only (#68.8)."),
             "tx_frequency_hz":    tx["frequency_hz"],
             "tx_waveform":        tx["waveform"],
             "tx_on_time_us":      tx["on_time_us"],

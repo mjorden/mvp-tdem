@@ -258,6 +258,15 @@ def _validate(df: pd.DataFrame, config: dict) -> pd.DataFrame:
             "These must match."
         )
 
+    # gate times must be positive and strictly increasing (#68.5): a mis-ordered
+    # or non-positive table silently mispairs every gate with the wrong time
+    gt = np.asarray(gate_times, dtype=float)
+    if gt.size and (gt[0] <= 0 or np.any(np.diff(gt) <= 0)):
+        raise ValueError(
+            "gate_times_ms must be positive and strictly increasing (ms after "
+            f"turnoff); got {gate_times}."
+        )
+
     # Gate times must fit inside the waveform off-time (#1): a bipolar square
     # wave at base frequency f has a half-period of 1/(2f); subtracting the
     # on-time leaves the measurable off-time window.
@@ -311,6 +320,15 @@ def _clean(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     every dropped row is reported.
     """
     gate_cols = gate_columns(df)
+
+    # 0. normalize the line-id dtype (#68.4): Geosoft parsing yields STRING line
+    #    ids, a flat CSV yields ints, so load_line(df, 2000) failed on Geosoft
+    #    files with a confusing "not found". If every id is integer-valued, store
+    #    as int; otherwise leave the (string) ids untouched.
+    if "line" in df.columns:
+        line_num = pd.to_numeric(df["line"], errors="coerce")
+        if line_num.notna().all() and np.all(line_num == np.round(line_num)):
+            df["line"] = line_num.astype("int64")
 
     # 1. coerce every non-id column to numeric ('*' and junk → NaN)
     numeric_cols = [c for c in df.columns if c not in ("line", "fiducial")]

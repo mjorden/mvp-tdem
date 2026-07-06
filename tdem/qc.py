@@ -410,10 +410,12 @@ def qc_summary(df: pd.DataFrame) -> dict:
 def _print_summary(summary: dict) -> None:
     n_total, n_flagged = summary["n_total"], summary["n_flagged"]
     frac = 100 * summary["flagged_frac"]
+    # the per-gate flag is set for both sub-floor AND NaN gates, so label it
+    # honestly rather than "below noise floor" alone (#68.6)
     print(
         f"[qc] {n_total} soundings — "
         f"{n_flagged} flagged ({frac:.1f}%) | "
-        f"{summary['n_gate_below_floor']} individual gate values below noise floor"
+        f"{summary['n_gate_below_floor']} individual gates flagged (below floor or NaN)"
     )
     for col, n in summary["per_flag"].items():
         if n > 0:
