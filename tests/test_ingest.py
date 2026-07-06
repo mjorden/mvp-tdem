@@ -171,6 +171,34 @@ def test_calibrate_falls_back_to_nominal_current_in_gaps():
     assert out.loc[0, "gate_00"] == pytest.approx(1e-3)
 
 
+def test_calibrate_rejects_signed_bipolar_current():
+    """#65.2: a non-positive current means a signed monitor log — hard error."""
+    txcur = pd.DataFrame({"t_utc": [T0 - 1, T0 + 1], "current_a": [220.0, -220.0]})
+    with pytest.raises(ValueError, match="non-positive"):
+        calibrate(_stacked(), _INSTRUMENT, txcur_df=txcur)
+
+
+def test_calibrate_warns_current_far_from_nominal():
+    """#65.2: current well outside ±20% of nominal warns but proceeds."""
+    import warnings
+    txcur = pd.DataFrame({"t_utc": [T0 - 1, T0 + 1], "current_a": [400.0, 400.0]})  # 2× nominal
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        calibrate(_stacked(), _INSTRUMENT, txcur_df=txcur)
+    assert any("nominal" in str(x.message) for x in w)
+
+
+def test_calibrate_window_average_de_aliases_current():
+    """#65.1: with window_s set, current is averaged over the window, not sampled once."""
+    # an early sag to 170 A that a centre-instant sample (which would read ~210
+    # between the two neighbours) misses entirely; the window mean is 200 A
+    txcur = pd.DataFrame({"t_utc": [T0 - 0.2, T0 - 0.1, T0 + 0.1, T0 + 0.2],
+                          "current_a": [170.0, 210.0, 210.0, 210.0]})
+    out, _ = calibrate(_stacked(), _INSTRUMENT, txcur_df=txcur, window_s=0.48)
+    # window mean = (170+210+210+210)/4 = 200 A = nominal → gate 1e-3
+    assert out.loc[0, "gate_00"] == pytest.approx(1e-3, rel=1e-6)
+
+
 # ---------------------------------------------------------------------------
 # merge
 # ---------------------------------------------------------------------------

@@ -41,16 +41,25 @@ def emit_survey(
 
     df = soundings.copy()
 
+    # RAW_INGEST.md promises these counts in the provenance block (#67.2) — record
+    # them, not just print them, so a delivered sidecar carries what was dropped
     no_pos = df[["easting", "northing", "elevation", "dem"]].isna().any(axis=1)
-    if no_pos.any():
-        print(f"[emit] Dropped {no_pos.sum()} soundings with no position (nav gaps)")
+    n_dropped_nav = int(no_pos.sum())
+    if n_dropped_nav:
+        print(f"[emit] Dropped {n_dropped_nav} soundings with no position (nav gaps)")
         df = df[~no_pos]
     off_line = df["line"] == -1
-    if off_line.any():
-        print(f"[emit] Dropped {off_line.sum()} soundings outside lines (turns)")
+    n_dropped_offline = int(off_line.sum())
+    if n_dropped_offline:
+        print(f"[emit] Dropped {n_dropped_offline} soundings outside lines (turns)")
         df = df[~off_line]
     if df.empty:
         raise ValueError("No soundings left after dropping nav gaps and turns")
+
+    provenance = {**provenance,
+                  "n_dropped_nav": n_dropped_nav,
+                  "n_dropped_offline": n_dropped_offline,
+                  "n_soundings_emitted": len(df)}
 
     gate_cols = stacked_gate_columns(df)
     out = pd.DataFrame({

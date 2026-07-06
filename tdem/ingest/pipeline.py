@@ -92,9 +92,12 @@ def stack_and_locate(em, gps, alt, txcur, lines_df, instrument, survey_cfg,
     """The format-agnostic core: time-synced frames in, located soundings out."""
     from .stack import stack_soundings
 
-    df = stack_soundings(em, n_stack=n_stack, trim_frac=trim_frac,
-                         tx_frequency_hz=instrument["tx"].get("frequency_hz"))
-    df, moment_mode = calibrate(df, instrument, txcur, max_gap_s=max_gap_s)
+    f_tx = instrument["tx"].get("frequency_hz")
+    df = stack_soundings(em, n_stack=n_stack, trim_frac=trim_frac, tx_frequency_hz=f_tx)
+    # stack window spans n_stack half-cycles → n_stack/(2·f) seconds; averaging the
+    # Tx current over it de-aliases a slow monitor (#65.1)
+    window_s = n_stack / (2.0 * f_tx) if f_tx else 0.0
+    df, moment_mode = calibrate(df, instrument, txcur, max_gap_s=max_gap_s, window_s=window_s)
     df = merge_nav(df, gps, alt, max_gap_s=max_gap_s)
     df = project(df, epsg=survey_cfg["survey"]["epsg"])
     df = elevations(df, geoid_offset_m=survey_cfg["survey"].get("geoid_offset_m", 0.0))
@@ -125,8 +128,27 @@ def ingest_survey(
 
     provenance = {
         "ingest_version": "0.1",
+        "git_commit": _git_commit(),                       # #67.3
+        # hash the configs, not just their paths (#67.1): the sidecar physics
+        # block is GENERATED from instrument.yaml, so an after-the-fact yaml edit
+        # would otherwise be undetectable
         "instrument_config": str(instrument_path),
+        "instrument_config_sha256": file_digest(instrument_path),
         "survey_config": str(survey_path),
+        "survey_config_sha256": file_digest(survey_path),
         "flights": flights_prov,
     }
     return emit_survey(df, instrument, survey_cfg, out_csv, out_config, provenance)
+
+
+def _git_commit() -> str | None:
+    """Best-effort short git commit for provenance (#67.3); None if unavailable."""
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(Path(__file__).parent), "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return out.stdout.strip() or None if out.returncode == 0 else None
+    except Exception:
+        return None
