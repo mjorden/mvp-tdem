@@ -473,23 +473,26 @@ def invert_line(
         try:
             rho, chi, ok, doi_m, rho_sd = invert_sounding(
                 fwd, data[i], rho_initial=rho_start, **kwargs)
-            # #62: always ALSO run the cold start and keep the better fit — not
-            # only when the warm fit trips the chi>threshold trap guard (#15).
-            # Processing order tracks flight direction (sort by fiducial), so a
-            # warm-only chain smears anomaly edges in the direction of travel and
-            # adjacent lines flown opposite ways get opposite-signed edge
-            # artifacts. Making the cold (direction-independent) start an
-            # unconditional candidate substantially reduces that hysteresis: a
-            # sounding keeps the warm result only when it strictly beats the cold
-            # one. It is not a full cure — a genuinely better warm minimum is
-            # still kept and remains direction-dependent; the real fix is LCI/SCI
-            # (Auken & Christiansen 2004), the acknowledged Phase 2 item.
-            # (chi_retry_threshold retained for API compatibility; the cold
-            # comparison no longer depends on it.)
+            # #62: always ALSO run the cold (direction-independent) start as a
+            # candidate — not only when the warm fit trips the chi>threshold trap
+            # guard (#15) — since processing order tracks flight direction and a
+            # warm-only chain smears anomaly edges in the direction of travel.
+            #
+            # But KEEP the warm model unless the cold one is MATERIALLY better
+            # (#4-review): warm and cold that both fit to within errors have chi
+            # values that differ only by noise, and the warm model is the smoother
+            # / laterally-continuous one (Occam-preferred). Swapping on a tiny chi
+            # win injected roughness the regularization exists to suppress and made
+            # the section stripe. The cold start therefore only wins when it beats
+            # warm by more than the per-sounding chi noise (~1/sqrt(2·n_gates)),
+            # which still catches genuine warm-start traps (warm badly underfit).
+            # Not a full cure for direction dependence — real fix is LCI/SCI.
             if warm_start and not np.isscalar(rho_start):
                 rho2, chi2, ok2, doi_m2, rho_sd2 = invert_sounding(
                     fwd, data[i], rho_initial=inv["rho_initial"], **kwargs)
-                if chi2 < chi:
+                n_gates_i = int((np.isfinite(data[i]) & (data[i] > censor_threshold)).sum())
+                chi_margin = max(0.1, 1.0 / np.sqrt(2 * max(n_gates_i, 1)))
+                if chi2 < chi - chi_margin:
                     rho, chi, ok, doi_m, rho_sd = rho2, chi2, ok2, doi_m2, rho_sd2
         except ValueError:
             n_failed += 1

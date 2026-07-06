@@ -106,6 +106,41 @@ def test_stack_pair_differencing_cancels_dc_offset():
     assert np.allclose(out[["gate_00", "gate_01", "gate_02"]], 10.0)
 
 
+def test_stack_dc_cancels_on_misaligned_balanced_window():
+    """#2: a balanced but phase-misaligned window (+,+,-,-) must still cancel DC
+    and NOT report an inflated SE — pairing is keyed on polarity, not position."""
+    import warnings
+    pol = np.array([1, 1, -1, -1] * 3, dtype=float)   # balanced, mis-phased
+    S, b = 10.0, 5.0                                   # response + receiver DC
+    v = pol * S + b
+    df = pd.DataFrame({"t_rx": np.arange(len(pol)) / 50.0, "polarity": pol,
+                       "t_utc": T0 + np.arange(len(pol)) / 50.0, "g00": v})
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        out = stack_soundings(df, n_stack=len(pol), trim_frac=0.1)
+    assert out.loc[0, "gate_00"] == pytest.approx(10.0)     # DC cancelled
+    assert out.loc[0, "gate_std_00"] < 0.1                  # SE not inflated by ±b
+    assert len(w) == 0                                       # balanced → no warning
+
+
+def test_stack_se_is_floored_not_zero():
+    """#3: a perfectly clean gate (MAD == 0) must not report se == 0."""
+    out = stack_soundings(_em_df(value=10.0), n_stack=24)
+    assert (out["gate_std_00"] > 0).all()
+
+
+def test_stack_warns_on_genuinely_unbalanced_window():
+    """#2: unequal +/- counts (DC truly can't cancel) must warn."""
+    import warnings
+    pol = np.array([1, 1, 1, -1] * 6, dtype=float)   # 3:1 imbalance per group
+    df = pd.DataFrame({"t_rx": np.arange(len(pol)) / 50.0, "polarity": pol,
+                       "t_utc": T0 + np.arange(len(pol)) / 50.0, "g00": pol * 10.0})
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        stack_soundings(df, n_stack=len(pol))
+    assert any("unequal" in str(x.message) for x in w)
+
+
 def test_stack_trimmed_mean_rejects_spike():
     df = _em_df()
     df.loc[3, ["g00", "g01", "g02"]] *= 20  # sferic hit on one half-cycle
