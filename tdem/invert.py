@@ -291,8 +291,7 @@ def invert_sounding(
     # penalize roughness per metre, not per interface — log-spaced meshes
     # otherwise punish the shallow model ~100x harder than the deep model
     D = np.diff(np.eye(n), axis=0)
-    dz = np.diff(layer_depths(fwd.thicknesses))          # spacing between layer tops
-    dz = np.append(dz, dz[-1])[: n - 1]                  # one weight per D row
+    dz = np.diff(layer_depths(fwd.thicknesses))          # n-1 spacings = one per D row (#43.4)
     w_z = np.sqrt(np.mean(dz) / dz)                      # normalized: mean weight ~ 1
     Dw = D * w_z[:, None]
     sqrt_as = np.sqrt(alpha_s)

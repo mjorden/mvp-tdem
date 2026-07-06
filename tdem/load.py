@@ -194,8 +194,17 @@ def _apply_column_map(raw: pd.DataFrame, col_map: dict) -> pd.DataFrame:
     if "__geosoft_line" in df.columns:
         df["line"] = df.pop("__geosoft_line")
 
+    # sfz_n is REQUIRED (#43.2): a silent default of 30 defaulted BOTH gate
+    # extraction and the gate_times length cross-check in tandem, so an omitted
+    # sfz_n surfaced as a confusing "gate columns not found" instead of naming
+    # the real problem. prefix/format keep sensible defaults.
+    if "sfz_n" not in col_map:
+        raise ValueError(
+            "column_map.sfz_n is required (number of gate columns) and must equal "
+            "len(gate_times_ms). Add it to the sidecar's column_map."
+        )
     prefix = col_map.get("sfz_prefix", "SFz")
-    n      = col_map.get("sfz_n", 30)
+    n      = col_map["sfz_n"]
     fmt    = col_map.get("sfz_format", "bracket")
 
     gate_raw = _gate_column_names(prefix, n, fmt)
@@ -242,7 +251,7 @@ def _validate(df: pd.DataFrame, config: dict) -> pd.DataFrame:
         raise ValueError(f"Missing required columns after column_map: {missing}")
 
     gate_times = config.get("gate_times_ms", [])
-    n_gates    = config["column_map"].get("sfz_n", 30)
+    n_gates    = config["column_map"]["sfz_n"]   # required; validated in _apply_column_map
     if len(gate_times) != n_gates:
         raise ValueError(
             f"gate_times_ms has {len(gate_times)} entries but sfz_n = {n_gates}. "

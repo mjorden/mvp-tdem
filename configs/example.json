@@ -21,7 +21,7 @@
     "sfz_prefix": "SFz",
     "sfz_n":      20,
     "sfz_format": "bracket",
-    "_sfz_format_note": "'bracket' → SFz[0]..SFz[29]; 'underscore' → SFz_00..SFz_29; 'zero_padded' → SFz00..SFz29"
+    "_sfz_format_note": "sfz_n gate columns → indices 0..sfz_n-1 (here 0..19). 'bracket' → SFz[0]..SFz[19]; 'underscore' → SFz_00..SFz_19; 'zero_padded' → SFz00..SFz19. sfz_n is REQUIRED and must equal len(gate_times_ms)."
   },
 
   "system": {
@@ -46,7 +46,8 @@
     0.1312, 0.1944, 0.2880, 0.4268, 0.6320, 0.9360, 1.3860,
     2.0524, 3.0400, 4.5012, 6.6680, 9.8760, 14.624
   ],
-  "_gate_times_note": "Gate-centre times in ms after turnoff. Length must equal sfz_n, and the last gate must fit inside the off-time: 1/(2·f) − on_time = 16 ms at 25 Hz / 4 ms on-time.",
+  "_gate_times_note": "Gate-CENTRE times in ms after turnoff. Length must equal sfz_n, and the last gate must fit inside the off-time: 1/(2·f) − on_time = 16 ms at 25 Hz / 4 ms on-time.",
+  "_gate_window_note": "The forward evaluates the gate-centre instant only; real receivers integrate over a finite window. For contiguous log-spaced windows at this spacing the bias is ~1% (window-average/centre ≈ 1.008 at a late-time p=2.5 slope). The schema has no gate_start_ms/gate_end_ms fields, so delivered VTEM/SkyTEM window tables cannot yet be integrated over — the centre-point approximation is silent and unquantifiable per survey (#44).",
 
   "inversion": {
     "n_layers":        36,

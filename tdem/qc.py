@@ -9,8 +9,8 @@ Operations (applied in order by run_qc)
                          amplitude concept, not a signed one)
 2. negative_gate_flag  — flag early-*time* negatives (cultural / instrument
                          artefact); late-time negatives are preserved (IP /
-                         inductive limit). Split is by gate TIME, not index
-                         (#66.6), so it doesn't drift with gate count/spacing
+                         chargeability effects, #44). Split is by gate TIME, not
+                         index (#66.6), so it doesn't drift with gate count/spacing
 3. altitude_flag       — flag soundings outside acceptable bird-height range
 4. dem_consistency     — flag soundings where DEM > Elevation (GPS/radar mismatch)
 5. along_line_despike  — lateral median filter; kills narrow along-line spikes per gate
@@ -73,7 +73,7 @@ def run_qc(
     mono_max_reversals : tolerated reversals before flagging (1 allows one blip)
     neg_early_max_ms   : gates earlier than this (by TIME, #66.6) are "early-time";
                          negatives there are treated as cultural. Later negatives
-                         are preserved (IP / inductive limit)
+                         are preserved (IP / chargeability effects, #44)
     neg_min_early      : escalate the per-sounding negative flag only when at
                          least this many early gates are negative (#66.6)
     verbose            : print the QC summary to stdout (#38). The same summary
@@ -146,8 +146,10 @@ def _negative_gate_flag(
     """
     Flag soundings with negative values in the EARLY-TIME gates.
 
-    Late-time sign reversals can be geophysically real (inductive limit / IP);
-    early negatives are almost always cultural noise or instrument artefact.
+    Late-time sign reversals can be geophysically real (IP / chargeability
+    effects — NOT the "inductive limit", which is the high-frequency in-phase
+    asymptote and produces no off-time sign reversal, #44); early negatives are
+    almost always cultural noise or instrument artefact.
 
     The early/late boundary is defined by gate TIME, not gate index (#66.6):
     an index-based `gate_cols[:n//2]` split silently moves the physical boundary

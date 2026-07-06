@@ -52,9 +52,9 @@ Outputs land in `output/`:
 
 | File | Contents |
 |------|----------|
-| `line_<id>_section.png` | Stitched resistivity cross-section (elevation-referenced, RMS strip on top) |
+| `line_<id>_section.png` | Stitched resistivity cross-section (elevation-referenced, chi misfit strip on top, below-DOI cells faded) |
 | `line_<id>_decays.png` | All observed decay curves, coloured by along-line position (quick QC view) |
-| `line_<id>_model.csv` | Long-format model: one row per (sounding, layer) with `rho`, `depth_top`, `rms`, `distance` |
+| `line_<id>_model.csv` | Self-describing long-format model: one row per (sounding, layer) with `rho`, `depth_top`, `depth_bottom`, `chi`, `doi_m`, `below_doi`, `n_gates_used`, `rho_sd`, `elev_ground`, `distance` |
 
 To regenerate the synthetic survey (e.g. after changing gate times):
 
@@ -135,9 +135,9 @@ python scripts/ingest_flight.py --flight data/flights/F_SYNTH_01 \
 
 ## Design notes
 
-- **Forward:** one `TDEMForward` per survey — gate times and layer geometry are fixed; simulations are cached per bird height (rounded to 0.1 m). Geometry is either `concentric_loop` (VTEM-style, Rx at loop centre — exact, no offset clamp) or `offset_dipole` (point dipole + horizontal Rx offset; offsets < 1 m are clamped to avoid Hankel-transform NaNs). MVP waveform is `StepOffWaveform`; real system waveforms (VTEM trapezoid, SkyTEM dual-moment) are Phase 2.
+- **Forward:** one `TDEMForward` per survey — gate times and layer geometry are fixed; simulations are cached per bird height (rounded to 0.1 m). Geometry is either `concentric_loop` (VTEM-style, Rx at loop centre — exact, no offset clamp) or `offset_dipole` (point dipole + horizontal Rx offset; offsets < 1 m are clamped to avoid Hankel-transform NaNs). When the sidecar declares `bipolar_square` with a base frequency and on-time, the forward models the full bipolar pulse train (#22) and the finite turn-off ramp (#52); an ideal step-off is the fallback. Gates are evaluated at their centre instant — finite-window integration (VTEM/SkyTEM window tables) is Phase 2 (~1% bias, see `configs/README.md`).
 - **Inversion:** Occam-style — log-space data misfit + `alpha_s` reference-model damping + `alpha_z` vertical first-difference smoothing, solved bounded with scipy Trust Region Reflective. Layer interfaces are fixed and log-spaced (`depth_min_m` → `depth_max_m`, `n_layers`; the last layer is a basal half-space starting at `depth_max_m`).
-- **Stitching:** soundings are inverted in along-line order, each warm-started from its neighbour's solution — cheap lateral continuity. A warm-started fit with RMS > 0.3 is retried from the cold reference model and the better fit is kept (warm-start trap guard). True 2D/LCI regularization is Phase 2.
+- **Stitching:** soundings are inverted in along-line order, each warm-started from its neighbour's solution — cheap lateral continuity. The cold reference model is always also run and the better-fitting of the two is kept, so results don't depend on flight direction (#62); the misfit is the error-normalized `chi` (chi ≈ 1 = fit to assigned errors). True 2D/LCI regularization is Phase 2.
 - **Sections:** `plot_section` hangs each sounding's layer column from its own ground elevation (GPS elevation − bird height), so topography is honoured. Colormap is reversed turbo — red = conductive, per EM convention.
 
 ## Running tests
@@ -150,5 +150,5 @@ Covers the loader (column-map conventions, validation, cleaning), all six QC che
 
 ## Roadmap
 
-- **Phase 1 (MVP — current):** loader + QC, per-sounding 1D inversion, stitched 2D section plot, synthetic end-to-end test
-- **Phase 2:** batch all lines with map-view products, real system waveforms, DOI estimation, per-gate uncertainty, lateral (LCI-style) regularization, interactive Plotly sections, VTK export
+- **Phase 1 (MVP — current):** loader + QC, per-sounding 1D inversion with analytic-Jacobian DOI and per-layer uncertainty, DOI-faded stitched 2D section plot, bipolar-train forward, Streamlit web UI, synthetic end-to-end test
+- **Phase 2:** batch all lines with map-view products, real system waveform tables (finite gate-window integration), lateral (LCI/SCI-style) regularization, finite-window forward, VTK export

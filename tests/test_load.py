@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from tdem.load import _clean, _read_csv, _validate, load_survey
+from tdem.load import _apply_column_map, _clean, _read_csv, _validate, load_survey
 
 
 def _df():
@@ -42,6 +42,12 @@ def test_gate_count_mismatch_rejected():
 def test_no_frequency_skips_offtime_check():
     cfg = _config([0.1, 743.0], f=None)
     _validate(_df(), cfg)  # no tx_frequency_hz → can't check, don't crash
+
+
+def test_missing_sfz_n_raises_clear_error():
+    """#43.2: an omitted sfz_n must name the real problem, not default to 30."""
+    with pytest.raises(ValueError, match="sfz_n is required"):
+        _apply_column_map(pd.DataFrame({"E": [1.0]}), {"easting": "E"})
 
 
 # ---------------------------------------------------------------------------

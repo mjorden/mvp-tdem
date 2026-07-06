@@ -35,7 +35,7 @@ exposed so you can inspect the intermediate objects.
   `good_soundings(df)` applies the mask when you want it
 - `invert_line` returns a `LineResult` whose `soundings` list carries
   `rho`, `depths`, `chi`, and `converged` per sounding
-- The final print confirms conductor recovery: ~15 Ω·m over the body vs ~200 Ω·m background
+- The final print confirms conductor recovery: ~5 Ω·m over the body vs ~200 Ω·m background
 
 **Outputs:** `output/examples/line_2000_decays.png`, `line_2000_section.png`, `line_2000_model.csv`
 
