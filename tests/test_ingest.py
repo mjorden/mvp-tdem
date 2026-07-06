@@ -85,33 +85,51 @@ def _em_df(n_hc=50, n_gates=3, value=10.0):
 
 def test_stack_polarity_alignment():
     """Alternating-sign raw values must stack to the positive response."""
-    out = stack_soundings(_em_df(), n_stack=25)
+    out = stack_soundings(_em_df(), n_stack=24)
     assert len(out) == 2
+    assert np.allclose(out[["gate_00", "gate_01", "gate_02"]], 10.0)
+
+
+def test_stack_rejects_odd_n_stack():
+    """#56: odd n_stack cannot balance +/- half-cycles → DC leak; must error."""
+    with pytest.raises(ValueError, match="EVEN"):
+        stack_soundings(_em_df(), n_stack=25)
+
+
+def test_stack_pair_differencing_cancels_dc_offset():
+    """#56: a constant receiver DC offset b must cancel exactly via pairing."""
+    df = _em_df()
+    b = 3.0                                   # additive DC on every half-cycle
+    for c in ["g00", "g01", "g02"]:
+        df[c] = df[c] + b
+    out = stack_soundings(df, n_stack=24)
     assert np.allclose(out[["gate_00", "gate_01", "gate_02"]], 10.0)
 
 
 def test_stack_trimmed_mean_rejects_spike():
     df = _em_df()
     df.loc[3, ["g00", "g01", "g02"]] *= 20  # sferic hit on one half-cycle
-    out = stack_soundings(df, n_stack=25, trim_frac=0.1)
+    out = stack_soundings(df, n_stack=24, trim_frac=0.1)
     assert np.allclose(out.loc[0, ["gate_00", "gate_01", "gate_02"]], 10.0)
 
 
 def test_stack_keeps_spread_and_drops_partial_window():
-    out = stack_soundings(_em_df(n_hc=60), n_stack=25)  # 60 = 2 full + 10
+    out = stack_soundings(_em_df(n_hc=60), n_stack=24)  # 60 = 2 full + 12
     assert len(out) == 2
     assert "gate_std_00" in out.columns
-    assert (out["n_used"] == 25).all()
+    assert (out["n_used"] == 24).all()
 
 
-def test_stack_timestamp_is_window_centre():
-    out = stack_soundings(_em_df(), n_stack=25)
-    assert out.loc[0, "t_utc"] == pytest.approx(T0 + np.mean(np.arange(25)) / 50)
+def test_stack_timestamp_centre_with_half_cycle_offset():
+    """#68.2: logged stamps are half-cycle STARTS; centre adds 0.5/(2·f)."""
+    out = stack_soundings(_em_df(), n_stack=24, tx_frequency_hz=25.0)
+    expected = T0 + np.mean(np.arange(24)) / 50 + 0.5 / (2 * 25.0)
+    assert out.loc[0, "t_utc"] == pytest.approx(expected)
 
 
 def test_stack_requires_t_utc():
     with pytest.raises(ValueError, match="t_utc"):
-        stack_soundings(_em_df().drop(columns="t_utc"), n_stack=25)
+        stack_soundings(_em_df().drop(columns="t_utc"), n_stack=24)
 
 
 # ---------------------------------------------------------------------------

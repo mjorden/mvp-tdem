@@ -92,7 +92,8 @@ def stack_and_locate(em, gps, alt, txcur, lines_df, instrument, survey_cfg,
     """The format-agnostic core: time-synced frames in, located soundings out."""
     from .stack import stack_soundings
 
-    df = stack_soundings(em, n_stack=n_stack, trim_frac=trim_frac)
+    df = stack_soundings(em, n_stack=n_stack, trim_frac=trim_frac,
+                         tx_frequency_hz=instrument["tx"].get("frequency_hz"))
     df, moment_mode = calibrate(df, instrument, txcur, max_gap_s=max_gap_s)
     df = merge_nav(df, gps, alt, max_gap_s=max_gap_s)
     df = project(df, epsg=survey_cfg["survey"]["epsg"])
