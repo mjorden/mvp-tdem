@@ -4,13 +4,16 @@ Half-cycles → soundings.
 The bipolar square wave flips the sign of the secondary response every
 half-cycle. Rather than demodulate-then-average the whole window (which cancels
 a receiver DC offset only when the window holds exactly n/2 of each polarity —
-broken by any dropped EM row or rank-based trimming), consecutive opposite-
-polarity half-cycles are differenced into DC-free PAIR estimates first (#56):
+broken by any dropped EM row or rank-based trimming), each + half-cycle is paired
+with a − half-cycle (keyed on the logged POLARITY column, #2) into a DC-free PAIR
+estimate first (#56):
 
-    pair = (pol_a·v_a + pol_b·v_b) / 2 = S      (the DC term b·(pol_a+pol_b)/2 = 0)
+    pair = (pol_a·v_a + pol_b·v_b) / 2 = S      (the DC term b·(pol_a+pol_b)/2 = 0,
+                                                 because the pair is + with −)
 
-then the pairs are trimmed-meaned. DC cancels exactly per pair regardless of the
-trim, and linear baseline drift cancels to first order.
+then the pairs are trimmed-meaned. Pairing on polarity — not on array position —
+means the cancellation survives a mis-phased-but-balanced window; genuinely
+unequal +/- counts (DC cannot cancel) are counted and warned.
 
 - gate value  = trimmed mean over the DC-free pair estimates
 - gate std    = robust standard ERROR of that estimate,
@@ -81,34 +84,55 @@ def stack_soundings(
 
     keep    = n_full * n_stack
     n_gates = len(gate_cols)
-    n_pairs = n_stack // 2
 
     gates = em_df[gate_cols].to_numpy(dtype=float)[:keep]
     pol   = em_df["polarity"].to_numpy(dtype=float)[:keep]
     t     = em_df["t_utc"].to_numpy(dtype=float)[:keep].reshape(n_full, n_stack)
 
-    # warn if any window is polarity-unbalanced — a symptom of dropped EM rows
-    # mis-phasing the fixed-size windows (#56); DC no longer cancels there
+    demod   = (gates * pol[:, None]).reshape(n_full, n_stack, n_gates)
     pol_win = pol.reshape(n_full, n_stack)
-    unbalanced = np.count_nonzero(np.abs(pol_win.sum(axis=1)) > 1e-9)
-    if unbalanced:
+
+    stacked = np.empty((n_full, n_gates))
+    se      = np.empty((n_full, n_gates))
+    n_unbalanced = 0
+
+    for w in range(n_full):
+        pw  = pol_win[w]
+        pos = np.where(pw > 0)[0]
+        neg = np.where(pw < 0)[0]
+        if len(pos) == len(neg) and len(pos) > 0:
+            # Pair the k-th + half-cycle with the k-th − (keyed on the POLARITY
+            # column, not on array position, #2): the pair (pol_a·v_a + pol_b·v_b)/2
+            # is DC-free ONLY when pol_a+pol_b=0. Consecutive-position pairing
+            # assumed strict alternation, so a balanced-but-mis-phased window
+            # (e.g. +,+,-,-, from an even number of dropped rows) previously
+            # produced same-polarity pairs that leaked DC while the window-sum
+            # balance check stayed silent. Explicit +/- pairing cancels DC for
+            # any interleaving.
+            pairs_w = 0.5 * (demod[w][pos] + demod[w][neg])   # (n_pairs, n_gates)
+        else:
+            # genuinely unequal +/- counts: DC cannot cancel — best-effort demod
+            # mean, and count it for a warning
+            n_unbalanced += 1
+            pairs_w = demod[w]
+
+        stacked[w] = trim_mean(pairs_w, proportiontocut=trim_frac, axis=0)
+        med = np.median(pairs_w, axis=0)
+        mad = np.median(np.abs(pairs_w - med), axis=0)
+        se[w] = 1.4826 * mad / np.sqrt(len(pairs_w))
+
+    # floor the robust SE so a quiet/quantized gate (MAD == 0) does not report a
+    # zero standard error — a downstream consumer using it directly as an
+    # inverse-variance weight would otherwise divide by zero (#3). Floored at a
+    # small fraction of the signal magnitude.
+    se = np.maximum(se, 1e-3 * np.abs(stacked))
+
+    if n_unbalanced:
         warnings.warn(
-            f"[stack] {unbalanced}/{n_full} windows have unequal +/- half-cycles "
-            "(likely dropped EM rows mis-phasing the stack); receiver DC offset "
-            "will leak into those soundings' late gates.",
+            f"[stack] {n_unbalanced}/{n_full} windows have unequal +/- half-cycles "
+            "(dropped EM rows); receiver DC offset will leak into those soundings.",
             stacklevel=2,
         )
-
-    # demodulate, then average consecutive half-cycles into DC-free pair estimates
-    demod = (gates * pol[:, None]).reshape(n_full, n_pairs, 2, n_gates)
-    pairs = demod.mean(axis=2)                       # (n_full, n_pairs, n_gates)
-
-    stacked = trim_mean(pairs, proportiontocut=trim_frac, axis=1)   # (n_full, n_gates)
-
-    # robust standard error of the stacked estimate (#33)
-    med = np.median(pairs, axis=1, keepdims=True)
-    mad = np.median(np.abs(pairs - med), axis=1)      # (n_full, n_gates)
-    se  = 1.4826 * mad / np.sqrt(n_pairs)
 
     t_centre = t.mean(axis=1)
     if tx_frequency_hz:
