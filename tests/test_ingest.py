@@ -207,10 +207,28 @@ def test_calibrate_falls_back_to_nominal_current_in_gaps():
 
 
 def test_calibrate_rejects_signed_bipolar_current():
-    """#65.2: a non-positive current means a signed monitor log — hard error."""
+    """#65.2: a SYSTEMATIC non-positive current means a signed monitor log — error."""
     txcur = pd.DataFrame({"t_utc": [T0 - 1, T0 + 1], "current_a": [220.0, -220.0]})
     with pytest.raises(ValueError, match="non-positive"):
         calibrate(_stacked(), _INSTRUMENT, txcur_df=txcur)
+
+
+def test_sanitize_current_masks_isolated_glitch_not_raise():
+    """#5: a few bad samples (glitch/dropout) are masked+warned, not fatal."""
+    from tdem.ingest.calibrate import _sanitize_current
+    import warnings
+    c = np.array([200.0] * 9 + [-5.0])          # 1 of 10 non-positive
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        out = _sanitize_current(c, 200.0)
+    assert np.isnan(out[-1]) and np.allclose(out[:9], 200.0)
+    assert any("masked" in str(x.message) for x in w)
+
+
+def test_sanitize_current_raises_when_systematic():
+    from tdem.ingest.calibrate import _sanitize_current
+    with pytest.raises(ValueError, match="non-positive"):
+        _sanitize_current(np.array([200.0, -200.0, 200.0, -200.0]), 200.0)
 
 
 def test_calibrate_warns_current_far_from_nominal():

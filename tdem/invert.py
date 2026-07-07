@@ -199,6 +199,7 @@ def invert_sounding(
     gate_sd: np.ndarray | None = None,
     min_gates: int = 3,
     censor_factor: float = 3.0,
+    doi_cum_frac: float = 0.85,
 ) -> tuple[np.ndarray, float, bool, float, np.ndarray]:
     """
     Invert one sounding for a layered resistivity model.
@@ -332,11 +333,14 @@ def invert_sounding(
     # (the floor is α_z, NOT α_z/2 — #60.5), then ONE bisection stage between the
     # last rejected α (larger/smoother, chi>target) and the first accepted α to
     # halve the roughness error for one extra solve (Constable et al. 1987, #60.1).
-    # If the very first (smoothest) grid point already fits, there is no larger α
-    # on the grid to search toward, so no bisection is done and an even smoother
-    # model may exist (#60.3). If no α reaches the target, the roughest model is
-    # returned with chi>target (an honest underfit; converged reflects only the
-    # solver's own success, #60.6).
+    # This is a single half-step, not a full root-find: it assumes chi is roughly
+    # monotone in α (true for the global optimum, only approximately for the
+    # bounded non-convex TRF solve), so the accepted α is the smoothest fitting
+    # one to within ~√2, not exactly (#8-review). If the very first (smoothest)
+    # grid point already fits, there is no larger α to search toward, so no
+    # bisection is done and an even smoother model may exist (#60.3). If no α
+    # reaches the target, the roughest solved model is returned with chi>target
+    # (an honest underfit; converged reflects only the solver's success, #60.6).
     ok = True
     chi = np.inf
     alpha = alpha_z * 2.0 ** cooling_octaves
@@ -368,13 +372,23 @@ def invert_sounding(
     dfac_f = _dlog_floored(pred_f[use], eps_pred)             # sign-safe (#53)
     J_data_f = w_d[:, None] * J_f[use] * dfac_f[:, None]      # (n_use, n_layers)
 
-    # DOI via column sensitivity (Christiansen & Auken 2012)
-    col_sq = np.sum(J_data_f ** 2, axis=0)
-    s_norm = col_sq / (col_sq.max() + 1e-300)
+    # DOI via CUMULATIVE column sensitivity (#7): the earlier version thresholded
+    # each layer against the single most-sensitive (shallow) layer, so deep layers
+    # always fell under the cutoff and the DOI read spuriously shallow — and that
+    # is not the cumulative-sensitivity DOI of Christiansen & Auken (2012). Here
+    # per-layer sensitivity s_j = ||J_:,j|| is accumulated from the surface down;
+    # the DOI is the depth by which the model has acquired `doi_cum_frac` of the
+    # total column sensitivity. Deeper layers contribute the residual sensitivity
+    # and are treated as poorly resolved.
+    s_layer = np.sqrt(np.sum(J_data_f ** 2, axis=0))
     all_depths = layer_depths(fwd.thicknesses)
-    sensitive = np.where(s_norm >= 0.2)[0]
-    doi_m = float(all_depths[min(sensitive[-1] + 1, len(all_depths) - 1)]) \
-        if len(sensitive) else float(all_depths[1])
+    total = s_layer.sum()
+    if total > 0:
+        cum = np.cumsum(s_layer) / total
+        doi_idx = int(np.searchsorted(cum, doi_cum_frac))
+        doi_m = float(all_depths[min(doi_idx, len(all_depths) - 1)])
+    else:
+        doi_m = float(all_depths[1])
 
     # Per-layer multiplicative uncertainty: 10^sqrt(diag(C_m))
     sqrt_a_final = np.sqrt(alpha)
