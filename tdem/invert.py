@@ -399,6 +399,14 @@ def invert_sounding(
     except np.linalg.LinAlgError:
         rho_sd = np.full(n, np.nan)
 
+    # The linearized Gauss-Newton covariance is only valid for INTERIOR
+    # parameters (#10): a layer pinned at rho_min/rho_max has a one-sided/undefined
+    # uncertainty, but M^{-1} still returns a finite (over-confident) value there.
+    # Report NaN for pegged layers so a consumer doesn't read the bound as a
+    # resolved value with a tight error bar.
+    pegged = (m <= lo + 1e-6) | (m >= hi - 1e-6)
+    rho_sd[pegged] = np.nan
+
     return 10.0 ** m, chi, ok, doi_m, rho_sd
 
 
@@ -435,9 +443,11 @@ def invert_line(
     inv = config["inversion"]
     noise_floor = config["system"].get("system_noise_floor", 0.0) \
         if inv.get("use_noise_floor", True) else 0.0
-    # must mirror invert_sounding's censor_factor default (#27/#59) so the
-    # reported n_gates_used matches the gates the misfit actually used
-    censor_threshold = 3.0 * noise_floor if noise_floor > 0 else 0.0
+    # single source of truth for the censor factor (#11): the same value is
+    # passed to invert_sounding AND used for the reported n_gates_used, so the
+    # two cannot silently desync if the survey overrides it in the config
+    censor_factor = inv.get("censor_factor", 3.0)
+    censor_threshold = censor_factor * noise_floor if noise_floor > 0 else 0.0
 
     if fwd is None:
         fwd = forward_from_config(config)
@@ -483,6 +493,7 @@ def invert_line(
             rel_error=inv.get("rel_error", 0.05),   # #17: floor when gate_sd present
             chi_target=inv.get("chi_target", 1.0),  # #10
             gate_sd=g_sd,                           # #61: per-gate sd from stacking
+            censor_factor=censor_factor,            # #11: same factor as n_gates_used
         )
         try:
             rho, chi, ok, doi_m, rho_sd = invert_sounding(
