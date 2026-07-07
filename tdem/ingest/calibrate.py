@@ -59,12 +59,25 @@ def calibrate(
         # computed) remains the fallback for sparsely-sampled windows and gaps
         if window_s > 0:
             hw = window_s / 2.0
+            n_windowed = 0
             for j, c in enumerate(centre):
                 in_win = np.abs(cur_t - c) <= hw
                 if in_win.sum() >= 2:
                     current[j] = cur_i[in_win].mean()
+                    n_windowed += 1
+            # #6: if almost no window held >=2 samples, the de-aliasing was a
+            # silent no-op (monitor too slow for this window / high base freq)
+            frac = n_windowed / max(len(centre), 1)
+            if frac < 0.5:
+                warnings.warn(
+                    f"[calibrate] Tx-current window averaging fell back to single-"
+                    f"instant interpolation for {100*(1-frac):.0f}% of soundings "
+                    f"(monitor too sparse for the {window_s*1000:.0f} ms window); "
+                    "current is NOT de-aliased for those.",
+                    stacklevel=2,
+                )
 
-        _validate_current(current, nominal_current)
+        current = _sanitize_current(current, nominal_current)
 
         # fall back to nominal current inside Tx-log gaps rather than
         # losing the sounding — the EM data itself is fine
@@ -84,32 +97,54 @@ def calibrate(
     return out, moment_mode
 
 
-def _validate_current(current: np.ndarray, nominal_a: float) -> None:
+def _sanitize_current(current: np.ndarray, nominal_a: float,
+                      max_bad_frac: float = 0.2) -> np.ndarray:
     """
-    Sanity-check the measured Tx current (#65.2). Readers stay dumb; the physics
-    check lives here.
+    Sanity-check the measured Tx current (#65.2) and return a cleaned copy.
 
-    A finite non-positive current is a hard error: the monitor is logging signed
-    bipolar current (aliased at ~5 Hz), so interpolation yields near-zero or
-    negative moments and calibrated gates explode or flip sign. A mean far from
-    the nominal plateau only warns — it may be a real generator problem, or the
-    nominal in instrument.yaml may be stale.
+    Readers stay dumb; the physics check lives here. Two regimes are
+    distinguished (#5-review — a single bad sample must not abort a good flight):
+
+    * SYSTEMATIC (> max_bad_frac of samples non-positive): the monitor is logging
+      SIGNED bipolar current (aliased at ~5 Hz), not the plateau magnitude — this
+      cannot be normalized by, so raise.
+    * ISOLATED (a few non-positive samples: a glitch or a brief Tx-off dropout):
+      mask those to NaN and warn; the existing gap path fills them with nominal,
+      preserving the otherwise-good EM data.
+
+    A surviving median far from the nominal plateau only warns.
     """
-    finite = current[np.isfinite(current)]
+    finite_mask = np.isfinite(current)
+    finite = current[finite_mask]
     if finite.size == 0:
-        return
-    if np.any(finite <= 0):
-        n_bad = int(np.count_nonzero(finite <= 0))
+        return current
+
+    nonpos_frac = float(np.count_nonzero(finite <= 0)) / finite.size
+    if nonpos_frac > max_bad_frac:
         raise ValueError(
-            f"Tx current has {n_bad} non-positive value(s) — the monitor is "
-            "logging signed bipolar current, not the plateau magnitude. Rectify "
-            "it upstream; a 5 Hz signed log cannot be normalized by."
+            f"{100*nonpos_frac:.0f}% of Tx current samples are non-positive — the "
+            "monitor is logging signed bipolar current, not the plateau magnitude. "
+            "A signed log cannot be normalized by; rectify it upstream."
         )
-    ratio = float(np.median(finite)) / nominal_a
-    if not 0.8 <= ratio <= 1.2:
+
+    current = current.astype(float, copy=True)
+    bad = finite_mask & (current <= 0)
+    if bad.any():
         warnings.warn(
-            f"[calibrate] median Tx current is {ratio:.2f}× nominal "
-            f"({np.median(finite):.1f} A vs {nominal_a:.1f} A) — outside ±20%. "
-            "Check the current monitor or the nominal moment in instrument.yaml.",
+            f"[calibrate] masked {int(bad.sum())} non-positive Tx current "
+            "value(s) (glitch/dropout) → nominal fallback for those soundings.",
             stacklevel=2,
         )
+        current[bad] = np.nan
+
+    good = current[np.isfinite(current) & (current > 0)]
+    if good.size:
+        ratio = float(np.median(good)) / nominal_a
+        if not 0.8 <= ratio <= 1.2:
+            warnings.warn(
+                f"[calibrate] median Tx current is {ratio:.2f}× nominal "
+                f"({np.median(good):.1f} A vs {nominal_a:.1f} A) — outside ±20%. "
+                "Check the current monitor or the nominal moment in instrument.yaml.",
+                stacklevel=2,
+            )
+    return current

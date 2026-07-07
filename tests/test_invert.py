@@ -41,6 +41,14 @@ def test_recover_halfspace(fwd):
     assert np.all(rho_sd >= 1.0)
 
 
+def test_doi_within_mesh_and_cumulative(fwd):
+    """#7: cumulative-sensitivity DOI is a positive depth inside the mesh."""
+    d_obs = fwd.predict(np.full(N_LAYERS, 50.0), BIRD)
+    _, _, _, doi_m, _ = invert_sounding(fwd, d_obs, BIRD, rho_initial=100.0, max_iter=40)
+    depth_max = 150 * 1.4          # mesh + basal cell
+    assert 0 < doi_m <= depth_max
+
+
 def test_conductor_detected(fwd):
     """Two-decade contrast: conductive earth inverts more conductive than resistive earth."""
     d_cond = fwd.predict(np.full(N_LAYERS, 10.0), BIRD)

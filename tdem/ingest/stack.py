@@ -17,9 +17,10 @@ unequal +/- counts (DC cannot cancel) are counted and warned.
 
 - gate value  = trimmed mean over the DC-free pair estimates
 - gate std    = robust standard ERROR of that estimate,
-                1.4826·MAD(pairs)/√n_pairs (#33: NOT the raw single-half-cycle
-                std, which is ~√n larger and re-inflated by the very sferics the
-                trim rejected — used as a noise model it drove chi ≪ 1)
+                1.4826·MAD(pairs)/√n_kept, floored (#33/#3/#9: NOT the raw single-
+                half-cycle std, which is ~√n larger and re-inflated by the very
+                sferics the trim rejected — used as a noise model it drove chi ≪ 1.
+                n_kept is the trimmed count the point estimate actually averages.)
 - timestamp   = window centre, advanced half a half-cycle because the logged
                 stamps are half-cycle START times (#68.2)
 
@@ -119,7 +120,11 @@ def stack_soundings(
         stacked[w] = trim_mean(pairs_w, proportiontocut=trim_frac, axis=0)
         med = np.median(pairs_w, axis=0)
         mad = np.median(np.abs(pairs_w - med), axis=0)
-        se[w] = 1.4826 * mad / np.sqrt(len(pairs_w))
+        # SE of the TRIMMED mean uses the kept count, not all pairs (#9): the
+        # point estimate averages n_kept ≈ (1-2·trim_frac)·n_pairs values, so
+        # dividing by √n_pairs understated the error of the reported value
+        n_kept = max(len(pairs_w) - 2 * int(trim_frac * len(pairs_w)), 1)
+        se[w] = 1.4826 * mad / np.sqrt(n_kept)
 
     # floor the robust SE so a quiet/quantized gate (MAD == 0) does not report a
     # zero standard error — a downstream consumer using it directly as an
