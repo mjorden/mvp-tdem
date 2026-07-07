@@ -242,13 +242,14 @@ def test_calibrate_warns_current_far_from_nominal():
 
 
 def test_calibrate_window_average_de_aliases_current():
-    """#65.1: with window_s set, current is averaged over the window, not sampled once."""
-    # an early sag to 170 A that a centre-instant sample (which would read ~210
-    # between the two neighbours) misses entirely; the window mean is 200 A
-    txcur = pd.DataFrame({"t_utc": [T0 - 0.2, T0 - 0.1, T0 + 0.1, T0 + 0.2],
-                          "current_a": [170.0, 210.0, 210.0, 210.0]})
+    """#65.1/#12: current is time-weighted-averaged over the window, not sampled once."""
+    # symmetric edge dips a centre-instant sample (~210) would miss; evenly spaced
+    # so the trapezoidal mean is exactly nominal 200 A while a plain sample mean
+    # would be 195 A — the test therefore also pins the time-weighting (#12)
+    txcur = pd.DataFrame({"t_utc": [T0 - 0.15, T0 - 0.05, T0 + 0.05, T0 + 0.15],
+                          "current_a": [180.0, 210.0, 210.0, 180.0]})
     out, _ = calibrate(_stacked(), _INSTRUMENT, txcur_df=txcur, window_s=0.48)
-    # window mean = (170+210+210+210)/4 = 200 A = nominal → gate 1e-3
+    # trapezoidal mean = (0.5·180 + 210 + 210 + 0.5·180)/3 = 200 A = nominal → 1e-3
     assert out.loc[0, "gate_00"] == pytest.approx(1e-3, rel=1e-6)
 
 

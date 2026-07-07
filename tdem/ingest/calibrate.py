@@ -63,7 +63,19 @@ def calibrate(
             for j, c in enumerate(centre):
                 in_win = np.abs(cur_t - c) <= hw
                 if in_win.sum() >= 2:
-                    current[j] = cur_i[in_win].mean()
+                    # time-weighted (trapezoidal) mean, not a plain sample mean
+                    # (#12): irregular monitor timing would otherwise bias the
+                    # window-average current toward whichever edge is oversampled
+                    tw = cur_t[in_win]; iw = cur_i[in_win]
+                    order = np.argsort(tw); tw, iw = tw[order], iw[order]
+                    span = tw[-1] - tw[0]
+                    if span > 0:
+                        # trapezoidal integral / span (np.trapz was removed in
+                        # numpy 2.x, so integrate explicitly)
+                        integral = np.sum(0.5 * (iw[1:] + iw[:-1]) * np.diff(tw))
+                        current[j] = integral / span
+                    else:
+                        current[j] = iw.mean()
                     n_windowed += 1
             # #6: if almost no window held >=2 samples, the de-aliasing was a
             # silent no-op (monitor too slow for this window / high base freq)

@@ -38,7 +38,7 @@ def test_recover_halfspace(fwd):
     assert doi_m > 0
     # rho_sd must be per-layer multiplicative factors >= 1
     assert rho_sd.shape == rho.shape
-    assert np.all(rho_sd >= 1.0)
+    assert np.all((rho_sd >= 1.0) | np.isnan(rho_sd))  # NaN for pegged layers (#10)
 
 
 def test_doi_within_mesh_and_cumulative(fwd):
@@ -80,6 +80,17 @@ def test_bounds_respected(fwd):
     rho, *_ = invert_sounding(fwd, d_obs, BIRD, rho_min=20.0, rho_max=500.0)
     assert np.all(rho >= 20.0 - 1e-6)
     assert np.all(rho <= 500.0 + 1e-6)
+
+
+def test_pegged_layer_uncertainty_is_nan(fwd):
+    """#10: a layer pinned at a bound has undefined linearized uncertainty → NaN."""
+    # true 5 ohm-m but rho_min=20 forces the shallow layers onto the lower bound
+    d_obs = fwd.predict(np.full(N_LAYERS, 5.0), BIRD)
+    rho, _, _, _, rho_sd = invert_sounding(fwd, d_obs, BIRD, rho_min=20.0, rho_max=500.0)
+    pegged = rho <= 20.0 + 1e-6
+    assert pegged.any(), "test needs at least one pegged layer"
+    assert np.all(np.isnan(rho_sd[pegged]))         # no over-confident error at a bound
+    assert np.all(rho_sd[~pegged] >= 1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -189,8 +200,9 @@ def test_to_frame_layout(fwd):
         sub = frame[frame["fiducial"] == fid]
         assert sub["doi_m"].nunique() == 1
         assert (sub["doi_m"] > 0).all()
-    # rho_sd values are per-layer multiplicative factors >= 1
-    assert (frame["rho_sd"] >= 1.0).all()
+    # rho_sd values are per-layer multiplicative factors >= 1 (NaN where pegged, #10)
+    sd = frame["rho_sd"].to_numpy()
+    assert np.all((sd >= 1.0) | np.isnan(sd))
 
 
 def test_ground_elevation_computed(fwd):
