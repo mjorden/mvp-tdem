@@ -26,9 +26,9 @@ REPO = Path(__file__).parent.parent
 @pytest.fixture(scope="module")
 def ingested(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("raw_flight")
-    with open(REPO / "configs/instrument.yaml") as f:
+    with open(REPO / "configs/instrument.yaml", encoding="utf-8") as f:
         instrument = yaml.safe_load(f)
-    with open(REPO / "configs/survey_example.yaml") as f:
+    with open(REPO / "configs/survey_example.yaml", encoding="utf-8") as f:
         survey_cfg = yaml.safe_load(f)
 
     truth = generate_flight(tmp / "F01", instrument, survey_cfg,

@@ -37,7 +37,7 @@ def load_survey(csv_path: str | Path, config_path: str | Path) -> tuple[pd.DataF
     csv_path    = Path(csv_path)
     config_path = Path(config_path)
 
-    with open(config_path) as f:
+    with open(config_path, encoding="utf-8") as f:
         config = json.load(f)
 
     raw = _read_csv(csv_path)

@@ -154,7 +154,7 @@ def generate_flight(
 
 
 def _write(path: Path, cols: list[str], rows, comment: str) -> None:
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         f.write(f"# mvp-tdem synthetic {comment}\n")
         f.write(",".join(cols) + "\n")
         for r in rows:
