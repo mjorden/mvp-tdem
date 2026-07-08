@@ -71,6 +71,18 @@ Top-level list of additional fill values to treat as NaN, on top of the built-in
 
 Values are matched with a ±0.5 tolerance. Without this key only the built-in sentinels are recognized (#A17).
 
+## `decimal` — optional value-format hint
+
+Fortran `D`-exponent values (`1.2D-6`) are always repaired on load. European
+comma-decimal values (`1,234` meaning 1.234) are ambiguous with thousands
+separators, so they are converted **only** when the sidecar declares:
+
+```json
+"decimal": ","
+```
+
+Default is `"."` (no comma conversion).
+
 ## `inversion` — per-survey inversion defaults
 
 Consumed by `tdem.invert.invert_line()` / `invert_sounding()` and `tdem.forward.forward_from_config()`.

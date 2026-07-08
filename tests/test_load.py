@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from tdem.load import _apply_column_map, _clean, _read_csv, _validate, load_survey
+from tdem.load import _apply_column_map, _clean, _read_csv, _to_numeric, _validate, load_survey
 
 
 def _df():
@@ -91,6 +91,23 @@ def test_implausible_gate_amplitude_warns():
         warnings.simplefilter("always")
         _clean(df, {"column_map": {"sfz_n": 2}})
     assert any("different units" in str(x.message) for x in w)
+
+
+def test_to_numeric_repairs_fortran_d_exponent():
+    """#A16: Fortran D-exponent (1.2D-6) parses, not NaN — always applied."""
+    out = _to_numeric(pd.Series(["1.2D-6", "3.4d+02", "5.0e-9", "junk"]))
+    assert out[0] == pytest.approx(1.2e-6)
+    assert out[1] == pytest.approx(340.0)
+    assert out[2] == pytest.approx(5.0e-9)
+    assert np.isnan(out[3])
+
+
+def test_to_numeric_comma_decimal_opt_in():
+    """#A16: European comma decimal only when decimal=',' (ambiguous otherwise)."""
+    s = pd.Series(["1,234", "5,0"])
+    assert np.isnan(_to_numeric(s)[0])                       # default '.' → not parsed
+    out = _to_numeric(s, decimal=",")
+    assert out[0] == pytest.approx(1.234) and out[1] == pytest.approx(5.0)
 
 
 def test_non_monotonic_gate_times_rejected():

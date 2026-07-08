@@ -41,7 +41,7 @@ def load_survey(csv_path: str | Path, config_path: str | Path) -> tuple[pd.DataF
         config = json.load(f)
 
     raw = _read_csv(csv_path)
-    df  = _apply_column_map(raw, config["column_map"])
+    df  = _apply_column_map(raw, config["column_map"], decimal=config.get("decimal", "."))
     df  = _validate(df, config)
     df  = _clean(df, config)
 
@@ -174,7 +174,7 @@ def _read_csv(path: Path) -> pd.DataFrame:
     return df
 
 
-def _apply_column_map(raw: pd.DataFrame, col_map: dict) -> pd.DataFrame:
+def _apply_column_map(raw: pd.DataFrame, col_map: dict, decimal: str = ".") -> pd.DataFrame:
     """
     Rename raw columns to standardised names and extract gate columns.
 
@@ -218,7 +218,7 @@ def _apply_column_map(raw: pd.DataFrame, col_map: dict) -> pd.DataFrame:
         )
 
     for i, raw_col in enumerate(gate_raw):
-        df[f"sfz_{i:02d}"] = pd.to_numeric(raw[raw_col], errors="coerce")
+        df[f"sfz_{i:02d}"] = _to_numeric(raw[raw_col], decimal)
 
     # drop original gate columns now duplicated by the sfz_* ones
     df = df.drop(columns=[c for c in gate_raw if c in df.columns])
@@ -231,7 +231,7 @@ def _apply_column_map(raw: pd.DataFrame, col_map: dict) -> pd.DataFrame:
     std_raw = _gate_column_names(f"{prefix}_std", n, fmt)
     if all(c in raw.columns for c in std_raw):
         for i, raw_col in enumerate(std_raw):
-            df[f"sfz_std_{i:02d}"] = pd.to_numeric(raw[raw_col], errors="coerce")
+            df[f"sfz_std_{i:02d}"] = _to_numeric(raw[raw_col], decimal)
         df = df.drop(columns=[c for c in std_raw if c in df.columns])
 
     return df
@@ -311,6 +311,32 @@ _DUMMY_SENTINELS = np.array([-9999.0, -99999.0, -999999.0, 999999.0, 9999999.0])
 _DUMMY_HUGE = 1e30
 
 
+# Fortran double-precision exponent (1.2D-6) — a `D`/`d` flanked by a digit/dot
+# and an exponent. Older Geosoft/ASEG exports emit this; pandas reads it as NaN.
+_FORTRAN_D = re.compile(r"(?<=[0-9.])[dD](?=[+-]?\d)")
+
+
+def _to_numeric(series: pd.Series, decimal: str = ".") -> pd.Series:
+    """
+    Coerce to numeric, first repairing value formats pandas can't parse (#A16):
+
+    * Fortran `D` exponent (1.2D-6 → 1.2E-6) — always applied; `D` never appears
+      in a valid decimal number, so this is unambiguous.
+    * European comma decimal (1,234 → 1.234) — ONLY when the sidecar declares
+      `decimal: ","`, because a bare comma is ambiguous with a thousands
+      separator; auto-guessing would corrupt real values.
+
+    Numeric columns pandas already parsed are passed straight through untouched.
+    """
+    # not-already-numeric covers both object and the pandas>=3 `str` dtype
+    if not pd.api.types.is_numeric_dtype(series):
+        s = series.astype(str).str.replace(_FORTRAN_D, "E", regex=True)
+        if decimal == ",":
+            s = s.str.replace(",", ".", regex=False)
+        return pd.to_numeric(s, errors="coerce")
+    return pd.to_numeric(series, errors="coerce")
+
+
 def _replace_dummies(series: pd.Series, sentinels: np.ndarray = _DUMMY_SENTINELS) -> pd.Series:
     """NaN out dummy sentinels (tolerant match) and |x| >= 1e30 values.
 
@@ -345,10 +371,12 @@ def _clean(df: pd.DataFrame, config: dict) -> pd.DataFrame:
         if line_num.notna().all() and np.all(line_num == np.round(line_num)):
             df["line"] = line_num.astype("int64")
 
-    # 1. coerce every non-id column to numeric ('*' and junk → NaN)
+    # 1. coerce every non-id column to numeric ('*' and junk → NaN), repairing
+    #    Fortran-D / comma-decimal value formats first (#A16)
+    decimal = config.get("decimal", ".") if isinstance(config, dict) else "."
     numeric_cols = [c for c in df.columns if c not in ("line", "fiducial")]
     for col in numeric_cols:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
+        df[col] = _to_numeric(df[col], decimal)
 
     # 2. dummy sentinels → NaN on ALL numeric channels, not just gates.
     #    Extra survey-specific fills come from the sidecar `null_values` (#A17).
