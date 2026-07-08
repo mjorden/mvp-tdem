@@ -44,6 +44,32 @@ def test_no_frequency_skips_offtime_check():
     _validate(_df(), cfg)  # no tx_frequency_hz → can't check, don't crash
 
 
+def test_offtime_check_skipped_for_non_bipolar_waveform():
+    """#A18: the 1/(2f)-on_time off-time formula is bipolar-square-specific."""
+    # a late gate that WOULD fail the bipolar off-time check...
+    cfg = _config([0.1, 1.0, 21.7])
+    with pytest.raises(ValueError, match="off-time"):
+        _validate(_df(), cfg)                       # bipolar (default) → enforced
+    # ...must be accepted for a step-off waveform (no base-frequency off-time)
+    cfg["system"]["tx_waveform"] = "step_off"
+    _validate(_df(), cfg)                            # no raise
+
+
+def test_configurable_null_values():
+    """#A17: extra sentinels from the sidecar `null_values` are NaN'd."""
+    from tdem.load import _clean
+    df = pd.DataFrame({
+        "line": [1, 1], "easting": [1.0, 2.0], "northing": [1.0, 1.0],
+        "elevation": [100.0, 100.0], "dem": [35.0, 35.0],
+        "sfz_00": [1e-8, -99.9], "sfz_01": [1e-9, 1e-9],   # -99.9 is a custom fill
+    })
+    out = _clean(df.copy(), {"null_values": [-99.9]})
+    assert np.isnan(out.loc[out.index[out["easting"] == 2.0][0], "sfz_00"])
+    # without the config, -99.9 is a real value (not a default sentinel) → kept
+    out2 = _clean(df.copy(), {})
+    assert (out2["sfz_00"] == -99.9).any()
+
+
 def test_missing_sfz_n_raises_clear_error():
     """#43.2: an omitted sfz_n must name the real problem, not default to 30."""
     with pytest.raises(ValueError, match="sfz_n is required"):

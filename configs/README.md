@@ -58,7 +58,18 @@ Gate columns are described, not listed:
 Array of gate-centre times in **milliseconds after waveform turnoff**. Two hard constraints, both enforced at load time:
 
 1. Length must equal `column_map.sfz_n`.
-2. The last gate must fit inside the off-time window: `1/(2·tx_frequency_hz) − tx_on_time`. At 25 Hz with 4 ms on-time that's 16 ms — a gate at or beyond that is physically impossible and the loader raises.
+2. Gate times must be positive and strictly increasing.
+3. The last gate must fit inside the off-time window: `1/(2·tx_frequency_hz) − tx_on_time`. At 25 Hz with 4 ms on-time that's 16 ms — a gate at or beyond that is physically impossible and the loader raises. **This check is applied only for `tx_waveform: "bipolar_square"`** (the formula's assumption); for `step_off`/other waveforms it is skipped rather than wrongly rejecting a valid table (#A18).
+
+## `null_values` — optional extra dummy sentinels
+
+Top-level list of additional fill values to treat as NaN, on top of the built-in set (`±9999`, `±99999`, `±999999`, `9999999`, and any `|x| ≥ 1e30`). Contractors use different fills — add them here, e.g.:
+
+```json
+"null_values": [-99.9, -1e38]
+```
+
+Values are matched with a ±0.5 tolerance. Without this key only the built-in sentinels are recognized (#A17).
 
 ## `inversion` — per-survey inversion defaults
 
