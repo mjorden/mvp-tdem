@@ -221,9 +221,12 @@ def _apply_column_map(raw: pd.DataFrame, col_map: dict) -> pd.DataFrame:
     # drop original gate columns now duplicated by the sfz_* ones
     df = df.drop(columns=[c for c in gate_raw if c in df.columns])
 
-    # optionally load per-gate standard-deviation columns (SFz_std[i]) if present;
-    # emit always writes them in bracket format using "{prefix}_std[i]"
-    std_raw = _gate_column_names(f"{prefix}_std", n, "bracket")
+    # optionally load per-gate standard-deviation columns if present, in the
+    # SAME naming convention as the gates (#A15): a third-party underscore/zero-
+    # padded deliverable names its std columns to match, so hardcoding "bracket"
+    # silently ignored their measured uncertainty. Our own emit uses bracket
+    # gates too, so fmt=bracket there — this stays consistent.
+    std_raw = _gate_column_names(f"{prefix}_std", n, fmt)
     if all(c in raw.columns for c in std_raw):
         for i, raw_col in enumerate(std_raw):
             df[f"sfz_std_{i:02d}"] = pd.to_numeric(raw[raw_col], errors="coerce")

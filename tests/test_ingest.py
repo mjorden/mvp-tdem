@@ -61,6 +61,36 @@ def test_fit_clock_needs_two_pairs():
         fit_clock(_sync_df(n=1))
 
 
+def test_clock_extrapolation_capped():
+    """#G5: samples far outside the sync range get NaN, not stale-rate extrapolation."""
+    import warnings
+    m = ClockModel(t_rx_knots=np.array([500.0, 600.0]),
+                   t_utc_knots=T0 + np.array([500.0, 600.0]),
+                   max_residual_s=0.0, n_pairs=2)
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        out = m.to_utc(np.array([605.0, 5000.0]), max_extrap_s=10.0)
+    assert np.isfinite(out[0])          # 5 s past last knot → within margin
+    assert np.isnan(out[1])             # 4400 s past → NaN
+    assert any("outside the GPS-sync range" in str(x.message) for x in w)
+
+
+def test_leap_second_hard_errors():
+    """#G6: a seconds-scale sync-vs-GPS offset raises unless explicitly allowed."""
+    from tdem.ingest.pipeline import _assert_time_standards_agree
+    sync = pd.DataFrame({"t_utc": [T0, T0 + 1]})
+    gps = pd.DataFrame({"t_utc": [T0 - 18.0, T0 - 17.0]})   # ~18 s leap offset
+    with pytest.raises(ValueError, match="time-standard mismatch"):
+        _assert_time_standards_agree(sync, gps, allow_time_offset=False)
+    import warnings
+    with warnings.catch_warnings(record=True) as w:      # override proceeds w/ warning
+        warnings.simplefilter("always")
+        _assert_time_standards_agree(sync, gps, allow_time_offset=True)
+    assert any("Proceeding" in str(x.message) for x in w)
+    # aligned standards: no raise
+    _assert_time_standards_agree(sync, pd.DataFrame({"t_utc": [T0, T0 + 1]}), False)
+
+
 def test_apply_clock():
     import numpy as np
     t_rx = np.array([0.0, 100.0])
