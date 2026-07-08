@@ -50,6 +50,23 @@ def test_missing_sfz_n_raises_clear_error():
         _apply_column_map(pd.DataFrame({"E": [1.0]}), {"easting": "E"})
 
 
+def test_implausible_gate_amplitude_warns():
+    """#A1: gate values far outside V/(A·m⁴) range warn about likely wrong units."""
+    import warnings
+    from tdem.load import _clean
+    df = pd.DataFrame({
+        "line": [1000, 1000], "fiducial": [1, 2],
+        "easting": [5e5, 5e5], "northing": [4.9e6, 4.9e6],
+        "elevation": [100.0, 100.0], "dem": [35.0, 35.0],
+        # amplitudes ~1e3 — clearly not moment-normalized dB/dt
+        "sfz_00": [1200.0, 1300.0], "sfz_01": [800.0, 900.0],
+    })
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        _clean(df, {"column_map": {"sfz_n": 2}})
+    assert any("different units" in str(x.message) for x in w)
+
+
 def test_non_monotonic_gate_times_rejected():
     """#68.5: a mis-ordered gate-time table mispairs every gate → hard error."""
     with pytest.raises(ValueError, match="strictly increasing"):

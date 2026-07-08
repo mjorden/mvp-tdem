@@ -120,7 +120,9 @@ def _read_csv(path: Path) -> pd.DataFrame:
     A file is treated as Geosoft when it contains Line/Tie records or starts
     with a '/' comment; otherwise it goes straight to pandas as a flat table.
     """
-    lines = path.read_text().splitlines()
+    # utf-8-sig strips a leading BOM (#A16) — otherwise "﻿LINE" becomes the
+    # first header token and the column_map lookup for the first column fails
+    lines = path.read_text(encoding="utf-8-sig").splitlines()
 
     is_geosoft = any(_GEOSOFT_LINE_RE.match(l.strip()) for l in lines[:200]) \
         or (lines and lines[0].lstrip().startswith("/"))
@@ -355,5 +357,26 @@ def _clean(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     if all_nan.any():
         print(f"[load] Dropped {int(all_nan.sum())} soundings with all-NaN gates.")
     df = df[~all_nan].reset_index(drop=True)
+
+    # 5. units plausibility guard (#A1): the pipeline assumes moment-normalized
+    #    dB/dt in V/(A·m⁴), typically ~1e-6 (early) to ~1e-13 (late). A deliverable
+    #    in nT/s, ppm, µV, or un-normalized volts would load silently and invert to
+    #    garbage. A very loose amplitude window (13 decades) only trips on gross
+    #    unit mismatches, never on real data — warn, don't drop.
+    if gate_cols and len(df):
+        gvals = np.abs(df[gate_cols].to_numpy(dtype=float))
+        finite = gvals[np.isfinite(gvals) & (gvals > 0)]
+        if finite.size:
+            med = float(np.median(finite))
+            if not (1e-16 <= med <= 1e-3):
+                import warnings
+                warnings.warn(
+                    f"[load] median gate amplitude {med:.2e} is outside the physical "
+                    "range for moment-normalized dB/dt (~1e-13..1e-6 V/(A·m⁴)). The "
+                    "data may be in different units (nT/s, ppm, µV, un-normalized) — "
+                    "the pipeline assumes V/(A·m⁴) and will invert to wrong "
+                    "resistivities. Verify units before trusting results.",
+                    stacklevel=2,
+                )
 
     return df
