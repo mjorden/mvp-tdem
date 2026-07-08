@@ -51,13 +51,19 @@ class ClockModel:
         self.max_residual_s = float(max_residual_s)
         self.n_pairs      = int(n_pairs)
 
-    def to_utc(self, t_rx: np.ndarray) -> np.ndarray:
-        """Apply the piecewise-linear clock model with linear edge extrapolation.
+    def to_utc(self, t_rx: np.ndarray, max_extrap_s: float = 10.0) -> np.ndarray:
+        """Apply the piecewise-linear clock model with BOUNDED edge extrapolation.
 
-        np.interp clamps out-of-range values to the boundary knot, which
-        makes the converted timestamps non-monotone when streams extend
-        slightly beyond the sync range.  Linear extrapolation from the
-        nearest two knots preserves strict monotonicity.
+        np.interp clamps out-of-range values to the boundary knot, which makes
+        the converted timestamps non-monotone when streams extend slightly beyond
+        the sync range. Linear extrapolation from the nearest two knots preserves
+        strict monotonicity for a small margin.
+
+        But the oscillator rate is only ~linear locally: extrapolating far past
+        the last knot (e.g. a GPS-sync dropout minutes before flight end) accrues
+        unbounded timing error on real production data. Beyond `max_extrap_s` the
+        timestamps are set to NaN (so merge_nav drops those soundings rather than
+        geolocating them on a stale rate, #G5) and a warning is emitted.
         """
         t = np.atleast_1d(np.asarray(t_rx, dtype=float))
         y = np.interp(t, self.t_rx_knots, self.t_utc_knots)
@@ -72,6 +78,18 @@ class ClockModel:
                        (self.t_rx_knots[-1] - self.t_rx_knots[-2]))
             hi = t > self.t_rx_knots[-1]
             y[hi] = self.t_utc_knots[-1] + rate_hi * (t[hi] - self.t_rx_knots[-1])
+
+            # cap extrapolation distance beyond the sync range
+            too_far = ((t < self.t_rx_knots[0] - max_extrap_s) |
+                       (t > self.t_rx_knots[-1] + max_extrap_s))
+            if too_far.any():
+                warnings.warn(
+                    f"[timesync] {int(too_far.sum())} sample(s) fall >{max_extrap_s:.0f} s "
+                    "outside the GPS-sync range; their timestamps are NaN (dropped "
+                    "downstream) rather than extrapolated on a stale oscillator rate.",
+                    stacklevel=2,
+                )
+                y[too_far] = np.nan
 
         return y
 

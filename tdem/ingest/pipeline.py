@@ -53,18 +53,7 @@ def ingest_flight(flight_dir: str | Path, instrument: dict, survey_cfg: dict) ->
              if paths["txcur"] else None)
     lines_df = readers.read_lines(paths["lines"]) if paths["lines"] else None
 
-    # GPS-vs-UTC leap-second diagnostic (#64): if the sync log and GPS position
-    # log disagree by ~18–19 s their time standards differ (GPS ≠ UTC).
-    if "t_utc" in gps.columns:
-        dt = sync_df["t_utc"].median() - gps["t_utc"].median()
-        if 14.0 <= abs(dt) <= 22.0:
-            warnings.warn(
-                f"[timesync] Sync stream and GPS position stream differ by "
-                f"{dt:+.1f} s — possible GPS/UTC leap-second mismatch "
-                f"(current offset is ~18 s).  Verify both streams use the "
-                "same time standard or ~540 m position errors will result.",
-                stacklevel=2,
-            )
+    _assert_time_standards_agree(sync_df, gps, ing.get("allow_time_offset", False))
 
     df = stack_and_locate(em, gps, alt, txcur, lines_df, instrument, survey_cfg,
                           n_stack=n_stack, trim_frac=trim_frac, max_gap_s=max_gap_s)
@@ -85,6 +74,33 @@ def ingest_flight(flight_dir: str | Path, instrument: dict, survey_cfg: dict) ->
         "line_assignment": "operator_log" if lines_df is not None else "heading_auto",
     }
     return df, provenance
+
+
+def _assert_time_standards_agree(sync_df, gps, allow_time_offset: bool,
+                                 tol_s: float = 5.0) -> None:
+    """
+    GPS-vs-UTC leap-second check (#64/#G6): if the sync log and the GPS position
+    log disagree by seconds their time standards differ (GPS ≠ UTC), producing a
+    uniform ~540 m along-track shift. Too severe to ship on a warning a batch log
+    can bury, so it HARD-ERRORS by default; ingest.allow_time_offset=true overrides
+    once verified.
+    """
+    import warnings
+    if "t_utc" not in getattr(gps, "columns", []):
+        return
+    dt = float(sync_df["t_utc"].median() - gps["t_utc"].median())
+    if abs(dt) < tol_s:                       # sub-tolerance ⇒ ordinary clock jitter
+        return
+    msg = (f"[timesync] Sync stream and GPS position stream differ by {dt:+.1f} s "
+           "— GPS/UTC time-standard mismatch (leap-second offset ~18 s). Maps to "
+           f"~{abs(dt)*30:.0f} m along-track position error at survey speed.")
+    if allow_time_offset:
+        warnings.warn(msg + " Proceeding (allow_time_offset=true).", stacklevel=2)
+    else:
+        raise ValueError(
+            msg + " Fix the time standards, or set ingest.allow_time_offset: true "
+            "in the survey config to override."
+        )
 
 
 def stack_and_locate(em, gps, alt, txcur, lines_df, instrument, survey_cfg,
