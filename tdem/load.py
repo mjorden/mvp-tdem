@@ -274,10 +274,15 @@ def _validate(df: pd.DataFrame, config: dict) -> pd.DataFrame:
 
     # Gate times must fit inside the waveform off-time (#1): a bipolar square
     # wave at base frequency f has a half-period of 1/(2f); subtracting the
-    # on-time leaves the measurable off-time window.
+    # on-time leaves the measurable off-time window. This formula is SPECIFIC to
+    # the 50%-duty bipolar square (#A18) — a step-off / 100%-duty / half-sine
+    # system has a different (or no) off-time constraint, so the check is skipped
+    # for any non-bipolar_square waveform rather than wrongly rejecting a valid
+    # gate table (or falsely passing one).
     sysc = config.get("system", {})
     f    = sysc.get("tx_frequency_hz")
-    if f and gate_times:
+    is_bipolar = sysc.get("tx_waveform", "bipolar_square") == "bipolar_square"
+    if f and gate_times and is_bipolar:
         on_time_ms  = sysc.get("tx_on_time_us", 0) / 1000.0
         off_time_ms = 1000.0 / (2.0 * f) - on_time_ms
         if max(gate_times) >= off_time_ms:
@@ -306,11 +311,16 @@ _DUMMY_SENTINELS = np.array([-9999.0, -99999.0, -999999.0, 999999.0, 9999999.0])
 _DUMMY_HUGE = 1e30
 
 
-def _replace_dummies(series: pd.Series) -> pd.Series:
-    """NaN out dummy sentinels (tolerant match) and |x| >= 1e30 values."""
+def _replace_dummies(series: pd.Series, sentinels: np.ndarray = _DUMMY_SENTINELS) -> pd.Series:
+    """NaN out dummy sentinels (tolerant match) and |x| >= 1e30 values.
+
+    `sentinels` defaults to the common ASCII fills but can be extended per
+    survey via the sidecar `null_values` key (#A17) — contractors use different
+    fills (e.g. -99.9, -1e38) that the defaults don't cover.
+    """
     vals = series.to_numpy(dtype=float)
     bad = np.abs(vals) >= _DUMMY_HUGE
-    for s in _DUMMY_SENTINELS:
+    for s in sentinels:
         # abs tolerance of 0.5 catches float-dirt like -9999.0000001 without
         # matching real coordinates near sentinel magnitudes (e.g. northing 999,999 m)
         bad |= np.isclose(vals, s, rtol=0.0, atol=0.5)
@@ -340,9 +350,13 @@ def _clean(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     for col in numeric_cols:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # 2. dummy sentinels → NaN on ALL numeric channels, not just gates
+    # 2. dummy sentinels → NaN on ALL numeric channels, not just gates.
+    #    Extra survey-specific fills come from the sidecar `null_values` (#A17).
+    extra_nulls = config.get("null_values", []) if isinstance(config, dict) else []
+    sentinels = np.concatenate([_DUMMY_SENTINELS, np.asarray(extra_nulls, dtype=float)]) \
+        if extra_nulls else _DUMMY_SENTINELS
     for col in numeric_cols:
-        df[col] = _replace_dummies(df[col])
+        df[col] = _replace_dummies(df[col], sentinels)
 
     # 3. drop rows with unusable altimetry (NaN or non-positive radar height);
     #    reported, since dem is required for inversion geometry
