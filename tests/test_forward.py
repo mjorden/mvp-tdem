@@ -324,6 +324,34 @@ def test_forward_from_config():
     assert fwd._eval_times is not None
 
 
+def _example_config():
+    return json.loads((Path(__file__).parent.parent / "configs" / "example.json").read_text())
+
+
+def test_forward_from_config_rejects_unknown_waveform():
+    """#A2: an unsupported waveform must RAISE, not silently model a step-off."""
+    config = _example_config()
+    config["system"]["tx_waveform"] = "vtem_trapezoid"
+    with pytest.raises(ValueError, match="Unsupported tx_waveform"):
+        forward_from_config(config)
+
+
+def test_forward_from_config_rejects_non_z_orientation():
+    """#A3: a non-Z receiver orientation must RAISE, not silently return Z."""
+    config = _example_config()
+    config["system"]["rx_orientation"] = "X"
+    with pytest.raises(NotImplementedError, match="rx_orientation"):
+        forward_from_config(config)
+
+
+def test_forward_from_config_allows_step_off():
+    """An explicit ideal step-off is still accepted (no pulse train)."""
+    config = _example_config()
+    config["system"]["tx_waveform"] = "step_off"
+    fwd = forward_from_config(config)
+    assert fwd.tx_frequency_hz is None
+
+
 # ---------------------------------------------------------------------------
 # Analytic Jacobian (#58) — predict_and_jacobian
 # ---------------------------------------------------------------------------

@@ -357,7 +357,29 @@ def forward_from_config(config: dict) -> TDEMForward:
     sysc = config["system"]
     thk = layer_thicknesses(inv["depth_min_m"], inv["depth_max_m"], inv["n_layers"])
 
-    bipolar = (sysc.get("tx_waveform") == "bipolar_square"
+    # A2: only bipolar_square activates the pulse-train model; every other value
+    # would SILENTLY fall through to an ideal step-off (wrong early gates). Reject
+    # unknown waveforms loudly instead — a typo or an unsupported system waveform
+    # (VTEM trapezoid, half-sine, …) must fail, not model the wrong physics.
+    _SUPPORTED_WAVEFORMS = {"bipolar_square", "step_off", "step", "", None}
+    wf = sysc.get("tx_waveform")
+    if wf not in _SUPPORTED_WAVEFORMS:
+        raise ValueError(
+            f"Unsupported tx_waveform {wf!r}. Supported: 'bipolar_square' (pulse "
+            "train) or 'step_off'/'step' (ideal step). VTEM-trapezoid / half-sine / "
+            "measured-waveform tables are not modeled yet — do not silently degrade."
+        )
+
+    # A3: the receiver is hardcoded Z. rx_orientation is in the sidecar but was
+    # never wired in, so a non-Z config was silently ignored (Z response labeled X).
+    orient = str(sysc.get("rx_orientation", "Z")).upper()
+    if orient != "Z":
+        raise NotImplementedError(
+            f"rx_orientation={orient!r} is not supported — only Z-component dB/dt is "
+            "modeled. A non-Z orientation would silently return the Z response."
+        )
+
+    bipolar = (wf == "bipolar_square"
                and sysc.get("tx_frequency_hz") and sysc.get("tx_on_time_us"))
     return TDEMForward(
         gate_times_ms=config["gate_times_ms"],
