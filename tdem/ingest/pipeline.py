@@ -42,16 +42,26 @@ def ingest_flight(flight_dir: str | Path, instrument: dict, survey_cfg: dict) ->
 
     paths = readers.discover_flight(flight_dir)
 
-    sync_df = readers.read_sync(paths["sync"])
+    # sync is special: it DEFINES the clock the others are converted with
+    sync_df = readers.STREAMS["sync"].reader(paths["sync"])
     clock = fit_clock(sync_df,
                       max_residual_ms=instrument.get("clock", {}).get("max_residual_ms", 1.0))
 
-    em  = apply_clock(readers.read_em(paths["em"]), clock)
-    alt = apply_clock(readers.read_alt(paths["alt"]), clock)
-    gps = readers.read_gps(paths["gps"])
-    txcur = (apply_clock(readers.read_txcur(paths["txcur"]), clock)
-             if paths["txcur"] else None)
-    lines_df = readers.read_lines(paths["lines"]) if paths["lines"] else None
+    # every other stream is read + clock-converted generically from the
+    # registry (#87): a newly registered stream lands in `frames` with no
+    # edits here. Stage wiring below still names the core streams.
+    frames: dict[str, pd.DataFrame | None] = {}
+    for name, spec in readers.STREAMS.items():
+        if name == "sync":
+            continue
+        if not paths[name]:
+            frames[name] = None
+            continue
+        df_s = spec.reader(paths[name])
+        frames[name] = apply_clock(df_s, clock) if spec.needs_clock else df_s
+
+    em, gps, alt = frames["em"], frames["gps"], frames["alt"]
+    txcur, lines_df = frames["txcur"], frames["lines"]
 
     _assert_time_standards_agree(sync_df, gps, ing.get("allow_time_offset", False))
 

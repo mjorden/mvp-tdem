@@ -98,7 +98,10 @@ def build_sidecar(instrument: dict, survey_cfg: dict, n_gates: int, provenance: 
             f"produced {n_gates} gates — instrument config does not match the data."
         )
 
+    from ..schema import CANONICAL_UNITS, RESPONSE_QUANTITY, SCHEMA_VERSION
+
     return {
+        "schema_version": SCHEMA_VERSION,
         "survey": {
             "name":   survey_cfg["survey"]["name"],
             "system": instrument["instrument"]["name"],
@@ -129,6 +132,9 @@ def build_sidecar(instrument: dict, survey_cfg: dict, n_gates: int, provenance: 
             "rx_dz_m":            rx.get("dz_m", 0.0),
             "rx_orientation":     rx.get("orientation", "Z"),
             "system_noise_floor": instrument["noise_floor"],
+            # units declared, not assumed (#83): calibrate normalized to this
+            "units":              CANONICAL_UNITS,
+            "response_quantity":  RESPONSE_QUANTITY,
         },
         "gate_times_ms": gate_times,
         "inversion": survey_cfg["inversion"],
