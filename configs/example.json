@@ -1,5 +1,6 @@
 {
   "_comment": "Sidecar metadata for a helicopter TDEM survey CSV deliverable.",
+  "schema_version": 1,
 
   "survey": {
     "name":        "example_survey",
@@ -37,6 +38,9 @@
     "rx_dz_m":                  0.0,
     "rx_orientation":           "Z",
     "system_noise_floor":       1e-12,
+    "units":                    "V/(A·m⁴)",
+    "response_quantity":        "dBdt",
+    "_units_note":              "Declared, not assumed (#83): loader REJECTS any other units — no conversion exists. A deliverable in nT/s / ppm / pV/A must be converted upstream.",
     "_geometry_note":           "concentric_loop (VTEM-style, Rx at loop centre) or offset_dipole (+ tx_rx_separation_m)",
     "_noise_units":             "V/(A·m⁴) — same units as gate data; used as absolute error floor in quadrature with rel_error and per-gate SFz_std columns when present"
   },

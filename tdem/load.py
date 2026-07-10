@@ -40,6 +40,11 @@ def load_survey(csv_path: str | Path, config_path: str | Path) -> tuple[pd.DataF
     with open(config_path, encoding="utf-8") as f:
         config = json.load(f)
 
+    # schema gate (#87): unknown enum values / wrong units / future schema
+    # versions fail HERE, loudly, before any data is touched
+    from .schema import validate_sidecar
+    validate_sidecar(config, source=config_path.name)
+
     raw = _read_csv(csv_path)
     df  = _apply_column_map(raw, config["column_map"], decimal=config.get("decimal", "."))
     df  = _validate(df, config)

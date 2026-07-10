@@ -4,6 +4,26 @@ Each survey CSV is paired with a JSON sidecar that carries everything the CSV do
 
 Keys starting with `_` are comments — ignored by the loader.
 
+## Validation (`schema_version`)
+
+`load_survey` validates the sidecar before touching data (`tdem/schema.py`, #87):
+
+- `schema_version` (top-level int, current: `1`) — a sidecar with a *newer* version than the software understands is rejected; a missing field is treated as version 1.
+- Enumerated values (`tx_waveform`, `tx_geometry`, `rx_orientation`, `sfz_format`) must be registered in `tdem/schema.py` — unknown values raise instead of silently taking a wrong code path.
+- `system.units` / `system.response_quantity` — see below.
+- Unknown keys in the `inversion` block trigger a typo warning (they would otherwise silently no-op).
+
+To add a new waveform or geometry: implement it (`forward._transitions()` / `forward.GEOMETRY_BUILDERS`) and register the name in `tdem/schema.py`.
+
+## `system.units` and `system.response_quantity`
+
+The pipeline works exclusively in **moment-normalized dB/dt, V/(A·m⁴)** (#83). The sidecar declares this rather than assuming it:
+
+| Key | Value | Notes |
+|-----|-------|-------|
+| `units` | `"V/(A·m⁴)"` | Spelling variants like `V/(A.m^4)` accepted. **Any other unit is rejected** — no conversion exists; convert the deliverable upstream. Omitting the key warns (data assumed canonical). |
+| `response_quantity` | `"dBdt"` | B-field data is rejected — the forward models dB/dt only. |
+
 ## `survey` — provenance metadata
 
 Free-form; not used by the pipeline, but keep it filled in for report traceability.

@@ -116,8 +116,11 @@ class TDEMForward:
         self.gate_times_s = np.asarray(gate_times_ms, dtype=float) * 1e-3
         self.thicknesses = np.asarray(thicknesses, dtype=float)
         self.n_layers = len(self.thicknesses) + 1
-        if tx_geometry not in ("concentric_loop", "offset_dipole"):
-            raise ValueError(f"Unknown tx_geometry: {tx_geometry!r}")
+        if tx_geometry not in GEOMETRY_BUILDERS:
+            raise ValueError(
+                f"Unknown tx_geometry: {tx_geometry!r}. "
+                f"Registered: {sorted(GEOMETRY_BUILDERS)} (see GEOMETRY_BUILDERS, #87)"
+            )
         self.tx_geometry = tx_geometry
         self.tx_loop_radius_m = float(tx_loop_radius_m)
         self.rx_dz_m = float(rx_dz_m)
@@ -224,34 +227,10 @@ class TDEMForward:
         # DLF cost is nearly independent of the number of output times
         sim_times = self.gate_times_s if self._eval_times is None else self._eval_times
 
-        if self.tx_geometry == "concentric_loop":
-            # Rx at loop centre; SimPEG uses the loop radius as the Hankel
-            # offset for central-loop receivers — exact geometry, no clamp (#6)
-            rx_location = np.array([[0.0, 0.0, key + self.rx_dz_m]])
-            receiver = tdem.receivers.PointMagneticFluxTimeDerivative(
-                rx_location, times=sim_times, orientation="z"
-            )
-            r = self.tx_loop_radius_m
-            source = tdem.sources.CircularLoop(
-                [receiver],
-                location=np.array([0.0, 0.0, key]),
-                orientation="z",
-                radius=r,
-                current=1.0 / (np.pi * r ** 2),  # moment = I·πr² = 1 → output in V/(A·m⁴)
-                waveform=tdem.sources.StepOffWaveform(),
-            )
-        else:  # offset_dipole
-            rx_location = np.array([[self.tx_rx_separation_m, 0.0, key + self.rx_dz_m]])
-            receiver = tdem.receivers.PointMagneticFluxTimeDerivative(
-                rx_location, times=sim_times, orientation="z"
-            )
-            source = tdem.sources.MagDipole(
-                [receiver],
-                location=np.array([0.0, 0.0, key]),
-                orientation="z",
-                moment=1.0,  # unit moment → output is moment-normalized (V/(A·m⁴))
-                waveform=tdem.sources.StepOffWaveform(),
-            )
+        # geometry dispatch via registry (#87): adding a system geometry is
+        # "write a builder + register it in GEOMETRY_BUILDERS + KNOWN_GEOMETRIES",
+        # not edit this method
+        source = GEOMETRY_BUILDERS[self.tx_geometry](self, key, sim_times)
         survey = tdem.Survey([source])
 
         sim = tdem.Simulation1DLayered(
@@ -345,6 +324,52 @@ class TDEMForward:
 # Convenience constructor from sidecar config
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Geometry registry (#87)
+# ---------------------------------------------------------------------------
+# name -> builder(fwd, bird_height_key, sim_times) returning a SimPEG source
+# (with its receiver attached). To add a system geometry: write a builder,
+# register it here, and add the name to schema.KNOWN_GEOMETRIES — nothing in
+# _build_simulation changes.
+
+def _build_concentric_loop(fwd: TDEMForward, key: float, sim_times) -> "tdem.sources.BaseTDEMSrc":
+    # Rx at loop centre; SimPEG uses the loop radius as the Hankel offset for
+    # central-loop receivers — exact geometry, no clamp (#6)
+    rx_location = np.array([[0.0, 0.0, key + fwd.rx_dz_m]])
+    receiver = tdem.receivers.PointMagneticFluxTimeDerivative(
+        rx_location, times=sim_times, orientation="z"
+    )
+    r = fwd.tx_loop_radius_m
+    return tdem.sources.CircularLoop(
+        [receiver],
+        location=np.array([0.0, 0.0, key]),
+        orientation="z",
+        radius=r,
+        current=1.0 / (np.pi * r ** 2),  # moment = I·πr² = 1 → output in V/(A·m⁴)
+        waveform=tdem.sources.StepOffWaveform(),
+    )
+
+
+def _build_offset_dipole(fwd: TDEMForward, key: float, sim_times) -> "tdem.sources.BaseTDEMSrc":
+    rx_location = np.array([[fwd.tx_rx_separation_m, 0.0, key + fwd.rx_dz_m]])
+    receiver = tdem.receivers.PointMagneticFluxTimeDerivative(
+        rx_location, times=sim_times, orientation="z"
+    )
+    return tdem.sources.MagDipole(
+        [receiver],
+        location=np.array([0.0, 0.0, key]),
+        orientation="z",
+        moment=1.0,  # unit moment → output is moment-normalized (V/(A·m⁴))
+        waveform=tdem.sources.StepOffWaveform(),
+    )
+
+
+GEOMETRY_BUILDERS = {
+    "concentric_loop": _build_concentric_loop,
+    "offset_dipole": _build_offset_dipole,
+}
+
+
 def forward_from_config(config: dict) -> TDEMForward:
     """
     Build a TDEMForward from a survey sidecar config dict (see configs/example.json).
@@ -357,29 +382,28 @@ def forward_from_config(config: dict) -> TDEMForward:
     sysc = config["system"]
     thk = layer_thicknesses(inv["depth_min_m"], inv["depth_max_m"], inv["n_layers"])
 
-    # A2: only bipolar_square activates the pulse-train model; every other value
-    # would SILENTLY fall through to an ideal step-off (wrong early gates). Reject
-    # unknown waveforms loudly instead — a typo or an unsupported system waveform
-    # (VTEM trapezoid, half-sine, …) must fail, not model the wrong physics.
-    _SUPPORTED_WAVEFORMS = {"bipolar_square", "step_off", "step", "", None}
+    # A2: an unknown waveform must not silently degrade to a step-off; the
+    # enumeration lives in schema.KNOWN_WAVEFORMS (single source of truth, #87)
+    from .schema import KNOWN_ORIENTATIONS, KNOWN_WAVEFORMS
     wf = sysc.get("tx_waveform")
-    if wf not in _SUPPORTED_WAVEFORMS:
+    if wf not in (None, "") and wf not in KNOWN_WAVEFORMS:
         raise ValueError(
-            f"Unsupported tx_waveform {wf!r}. Supported: 'bipolar_square' (pulse "
-            "train) or 'step_off'/'step' (ideal step). VTEM-trapezoid / half-sine / "
-            "measured-waveform tables are not modeled yet — do not silently degrade."
+            f"Unsupported tx_waveform {wf!r}. Known: {sorted(KNOWN_WAVEFORMS)}. "
+            "VTEM-trapezoid / half-sine / measured-waveform tables are not modeled "
+            "yet — register in tdem/schema.py and implement in _transitions()."
         )
 
     # A3: the receiver is hardcoded Z. rx_orientation is in the sidecar but was
     # never wired in, so a non-Z config was silently ignored (Z response labeled X).
     orient = str(sysc.get("rx_orientation", "Z")).upper()
-    if orient != "Z":
+    if orient not in KNOWN_ORIENTATIONS:
         raise NotImplementedError(
             f"rx_orientation={orient!r} is not supported — only Z-component dB/dt is "
             "modeled. A non-Z orientation would silently return the Z response."
         )
 
-    bipolar = (wf == "bipolar_square"
+    # pulse-train activation is a property of the registered waveform
+    bipolar = (KNOWN_WAVEFORMS.get(wf, False)
                and sysc.get("tx_frequency_hz") and sysc.get("tx_on_time_us"))
     return TDEMForward(
         gate_times_ms=config["gate_times_ms"],

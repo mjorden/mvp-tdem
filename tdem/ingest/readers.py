@@ -24,42 +24,67 @@ skip unparseable rows. No physics, no dropping of parseable data.
 from __future__ import annotations
 
 import glob
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 import pandas as pd
 
-_STREAM_GLOBS = {
-    "em":    "em_*.log",
-    "sync":  "sync_*.log",
-    "gps":   "gps_*.log",
-    "alt":   "alt_*.log",
-    "txcur": "txcur_*.log",
-    "lines": "lines_*.csv",
-}
+# ---------------------------------------------------------------------------
+# Stream registry (#87)
+# ---------------------------------------------------------------------------
+# Adding a new instrument stream (attitude, laser altimeter, binary EM, …) is:
+# write a read_<stream>() below and register it here — discover_flight and the
+# pipeline's generic read-and-clock loop pick it up; no orchestration edits.
+# `needs_clock` marks streams stamped on the receiver clock (t_rx) that must be
+# converted to t_utc via the fitted clock model. `required` aborts discovery
+# when absent. NOTE: the pipeline's *stage wiring* (stack needs "em", merge
+# needs "gps"/"alt") still refers to the core streams by name — the registry
+# makes ingestion of a new stream drop-in, not the physics that consumes it.
 
-_REQUIRED_STREAMS = ("em", "sync", "gps", "alt")
+@dataclass(frozen=True)
+class StreamSpec:
+    glob: str
+    reader: "Callable[[list[Path]], pd.DataFrame]"
+    required: bool = False
+    needs_clock: bool = False
+
+
+def _registry() -> dict[str, StreamSpec]:
+    # built lazily so the spec can reference reader functions defined below
+    return {
+        "em":    StreamSpec("em_*.log",    read_em,    required=True,  needs_clock=True),
+        "sync":  StreamSpec("sync_*.log",  read_sync,  required=True,  needs_clock=False),
+        "gps":   StreamSpec("gps_*.log",   read_gps,   required=True,  needs_clock=False),
+        "alt":   StreamSpec("alt_*.log",   read_alt,   required=True,  needs_clock=True),
+        "txcur": StreamSpec("txcur_*.log", read_txcur, required=False, needs_clock=True),
+        "lines": StreamSpec("lines_*.csv", read_lines, required=False, needs_clock=False),
+    }
+
+
+STREAMS: dict[str, StreamSpec] = {}     # populated at module bottom
 
 
 def discover_flight(flight_dir: str | Path) -> dict[str, list[Path]]:
     """
     Map stream name → sorted list of matching files in a flight directory.
 
-    Raises if a required stream (em, sync, gps, alt) has no files.
+    Driven by the STREAMS registry; raises if a required stream has no files.
     """
     flight_dir = Path(flight_dir)
     if not flight_dir.is_dir():
         raise FileNotFoundError(f"Flight directory not found: {flight_dir}")
 
     found = {
-        name: sorted(Path(p) for p in glob.glob(str(flight_dir / pattern)))
-        for name, pattern in _STREAM_GLOBS.items()
+        name: sorted(Path(p) for p in glob.glob(str(flight_dir / spec.glob)))
+        for name, spec in STREAMS.items()
     }
-    missing = [s for s in _REQUIRED_STREAMS if not found[s]]
+    missing = [s for s, spec in STREAMS.items() if spec.required and not found[s]]
     if missing:
         raise FileNotFoundError(
             f"Flight {flight_dir.name}: no files for required stream(s) {missing}. "
-            f"Expected globs: {[_STREAM_GLOBS[s] for s in missing]}"
+            f"Expected globs: {[STREAMS[s].glob for s in missing]}"
         )
     return found
 
@@ -135,3 +160,7 @@ def read_lines(paths: list[Path]) -> pd.DataFrame:
 def em_gate_columns(em_df: pd.DataFrame) -> list[str]:
     """Ordered raw gate column names (g00, g01, ...)."""
     return sorted(c for c in em_df.columns if c.startswith("g") and c[1:].isdigit())
+
+
+# populate the registry now that the reader functions exist
+STREAMS.update(_registry())
