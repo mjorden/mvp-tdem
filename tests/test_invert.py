@@ -6,7 +6,7 @@ import pytest
 
 from tdem.forward import TDEMForward, layer_thicknesses
 from tdem.invert import (
-    invert_sounding, invert_line, LineResult, _log_floored, _dlog_floored,
+    invert_sounding, invert_line, LineResult, _asinh_scaled, _dasinh_scaled,
 )
 
 GATE_TIMES_MS = [0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 3.2, 6.4]
@@ -94,45 +94,59 @@ def test_pegged_layer_uncertainty_is_nan(fwd):
 
 
 # ---------------------------------------------------------------------------
-# #53: sign-safe log transform (no zero-gradient cliff on negative predictions)
+# #78: symmetric asinh transform (signed data inverted, no zero-gradient cliff)
 # ---------------------------------------------------------------------------
 
-def test_log_floored_matches_log_well_above_eps():
+def test_asinh_matches_log_well_above_scale():
+    """For |x| >> s: asinh(x/2s) ≈ ln(|x|/s) — the log-misfit limit."""
     x = np.array([1e-9, 1e-6, 1e-3])
-    eps = 1e-3 * x
-    assert np.allclose(_log_floored(x, eps), np.log(x))
+    s = 1e-4 * x
+    assert np.allclose(_asinh_scaled(x, s), np.log(x / s), rtol=1e-6)
 
 
-def test_log_floored_is_c1_continuous_at_eps():
-    eps = np.array([1e-9])
-    # value continuity: both branches meet at x == eps
-    assert np.isclose(_log_floored(eps, eps)[0], np.log(eps)[0])
-    # slope continuity: derivative is 1/eps on both sides of eps
-    assert np.isclose(_dlog_floored(eps, eps)[0], 1.0 / eps[0])
+def test_asinh_is_odd_and_smooth_through_zero():
+    """Signed data: f(-x) = -f(x); linear (not cliffed) near zero."""
+    s = np.array([1e-12, 1e-12])
+    x = np.array([3e-12, -3e-12])
+    f = _asinh_scaled(x, s)
+    assert f[1] == pytest.approx(-f[0])
+    # near zero the transform is ~x/(2s): no discontinuity, finite value
+    tiny = _asinh_scaled(np.array([1e-14]), np.array([1e-12]))[0]
+    assert tiny == pytest.approx(1e-14 / 2e-12, rel=1e-3)
 
 
-def test_dlog_floored_nonzero_gradient_for_negative_pred():
-    """The core of #53: a non-positive prediction must NOT give zero gradient."""
-    eps = np.array([1e-9, 1e-9])
-    x = np.array([-3e-9, 0.0])          # negative / zero prediction
-    g = _dlog_floored(x, eps)
-    assert np.all(g == 1.0 / eps)       # finite, large, positive — pushes pred up
-    assert np.all(g > 0)
+def test_dasinh_positive_gradient_everywhere():
+    """The #53/#78 requirement: gradient never vanishes, including x <= 0."""
+    s = np.full(4, 1e-12)
+    x = np.array([-5e-11, -1e-12, 0.0, 5e-11])
+    g = _dasinh_scaled(x, s)
+    assert np.all(np.isfinite(g)) and np.all(g > 0)
 
 
-def test_negative_gate_excluded_from_gate_count(fwd):
-    """#59: n_gates_used counts USED gates (finite & positive), not merely finite."""
+def test_negative_gate_now_inverted_not_censored(fwd):
+    """#78: a signed gate with amplitude above the censor IS used by the misfit."""
     d = fwd.predict(np.full(N_LAYERS, 100.0), BIRD)
     df = _make_line_df(fwd, [100.0])
     gcols = [f"sfz_{k:02d}" for k in range(N_LAYERS)]
-    df.loc[0, gcols[-1]] = -abs(d[-1])          # one finite-but-negative gate
+    df.loc[0, gcols[-1]] = -abs(d[-1])          # IP-like sign flip, strong amplitude
     result = invert_line(df, _config(), fwd=fwd, verbose=False)
     s = result.soundings[0]
-    assert s.n_gates_used == N_LAYERS - 1
-    # #93: the per-gate mask is exported and marks exactly the censored gate
-    assert s.gate_used is not None and s.gate_used.dtype == bool
-    assert not s.gate_used[-1] and s.gate_used[:-1].all()
-    assert int(s.gate_used.sum()) == s.n_gates_used
+    # censor threshold is 0 here (use_noise_floor False) → all finite gates used
+    assert s.n_gates_used == N_LAYERS
+    assert s.gate_used is not None and s.gate_used.all()
+    assert np.isfinite(s.chi) and np.all(np.isfinite(s.rho))
+
+
+def test_amplitude_censor_drops_near_floor_gates_of_either_sign(fwd):
+    """#27/#78: |d| <= 3·floor is censored regardless of sign; strong gates kept."""
+    d = fwd.predict(np.full(N_LAYERS, 100.0), BIRD)
+    floor = abs(d[-1])                           # set the floor at the last gate
+    d_obs = d.copy()
+    d_obs[-1] = -0.5 * floor                     # weak negative: |d| < 3·floor → censored
+    d_obs[-2] = -abs(d_obs[-2])                  # strong negative: kept and inverted
+    rho, chi, ok, *_ = invert_sounding(fwd, d_obs, BIRD, noise_floor=floor,
+                                       rho_initial=100.0, max_iter=40)
+    assert np.all(np.isfinite(rho)) and np.isfinite(chi)
 
 
 # ---------------------------------------------------------------------------

@@ -288,7 +288,7 @@ with tab_section:
             if s.gate_used is not None and not s.gate_used.all():
                 st.caption(
                     f"Open grey markers: {int((~s.gate_used).sum())} gate(s) shown "
-                    "but NOT used by the misfit (censored near-floor or negative)."
+                    "but NOT used by the misfit (amplitude within the noise-floor censor)."
                 )
 
 
@@ -605,19 +605,21 @@ It is included in the `[ui]` optional dependency group.
 This pipeline is a good **anomaly-finder** and a not-yet-trustworthy
 **absolute-measurement instrument**. Keep three limits in mind:
 
-1. **IP / chargeable ground is censored, not inverted.** The inversion drops
-   negative late-time gates before fitting, so over clay-rich or chargeable
-   cover, deep conductive features are suspect — the censoring biases
-   surviving late gates high (spuriously conductive basements).
+1. **Signed (IP / bipolar) late-time gates are inverted, not censored** —
+   negatives above the noise-floor censor enter the misfit via a symmetric
+   asinh transform (blue diamonds in the fit inspector). Caveat: the forward
+   has no explicit chargeability model, so a strongly IP-affected line may
+   stay systematically underfit (chi high) — that is a modeling limit, not
+   noise.
 2. **Below-DOI cells show the prior, not a result.** The faded region of the
    section (and `below_doi` in the model CSV) marks cells whose resistivity is
    essentially the starting model bent by regularization. Do not pick
    "basement contacts" beneath the DOI line.
-3. **Positions and depths lack layback/lever-arm correction.** On a real
-   flight the bird trails ~20–30 m behind and ~15–25 m below the GPS antenna;
-   adjacent lines flown in opposite directions can mis-tie by ~40–50 m, and
-   the vertical offset shifts depth-to-conductor. Synthetic data is
-   unaffected; real surveys need the correction first.
+3. **Layback/lever-arm is a static, configured correction.** Ingest shifts
+   the GPS-antenna position to the bird via `tow.layback_m` / `tow.drop_m` in
+   `instrument.yaml` — these must be measured and set before the first real
+   flight (the shipped zeros are correct only for synthetic data). Dynamic
+   cable swing / bird attitude are not corrected yet.
 
 Also: chi ≈ 1 means "fit to assigned errors under the regularization," not a
 strict statistical reduced-χ² — a handful of gates cannot uniquely constrain
