@@ -127,7 +127,12 @@ def test_negative_gate_excluded_from_gate_count(fwd):
     gcols = [f"sfz_{k:02d}" for k in range(N_LAYERS)]
     df.loc[0, gcols[-1]] = -abs(d[-1])          # one finite-but-negative gate
     result = invert_line(df, _config(), fwd=fwd, verbose=False)
-    assert result.soundings[0].n_gates_used == N_LAYERS - 1
+    s = result.soundings[0]
+    assert s.n_gates_used == N_LAYERS - 1
+    # #93: the per-gate mask is exported and marks exactly the censored gate
+    assert s.gate_used is not None and s.gate_used.dtype == bool
+    assert not s.gate_used[-1] and s.gate_used[:-1].all()
+    assert int(s.gate_used.sum()) == s.n_gates_used
 
 
 # ---------------------------------------------------------------------------

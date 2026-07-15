@@ -198,14 +198,28 @@ def plot_sounding_fit(
     out_path: str | Path | None = None,
     *,
     title: str | None = None,
+    gate_used: np.ndarray | None = None,
 ) -> plt.Figure:
-    """Two-panel diagnostic: decay fit (left) and recovered 1D model (right)."""
+    """Two-panel diagnostic: decay fit (left) and recovered 1D model (right).
+
+    gate_used (#93): per-gate mask of what the misfit actually used
+    (SoundingResult.gate_used). Finite gates OUTSIDE the mask — censored
+    near-floor / negative values that pass QC but are never fit — are drawn as
+    open grey circles so the interpreter can tell fitted data from displayed-
+    but-ignored data. Without the mask, behavior is unchanged.
+    """
     t = np.asarray(gate_times_ms, dtype=float)
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 5))
 
-    use = np.isfinite(d_obs) & (d_obs > 0)
-    ax1.loglog(t[use], d_obs[use], "ko", ms=5, label="observed")
+    finite_pos = np.isfinite(d_obs) & (d_obs > 0)
+    use = finite_pos if gate_used is None else (finite_pos & gate_used)
+    ax1.loglog(t[use], d_obs[use], "ko", ms=5, label="observed (fit)")
+    if gate_used is not None:
+        excl = np.isfinite(d_obs) & ~gate_used
+        if excl.any():
+            ax1.loglog(t[excl], np.abs(d_obs[excl]), "o", ms=5, mfc="none",
+                       mec="0.6", label="excluded (censored/negative)")
     ax1.loglog(t, d_pred, "r-", lw=1.5, label="predicted")
     ax1.set_xlabel("Time (ms)")
     ax1.set_ylabel("|dB/dt|  (V/(A·m⁴))")

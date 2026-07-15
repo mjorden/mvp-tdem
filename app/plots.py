@@ -235,10 +235,17 @@ def plotly_sounding_fit(
     rho: np.ndarray,
     depths: np.ndarray,
     title: str = "",
+    gate_used: np.ndarray | None = None,
 ) -> go.Figure:
-    """Observed vs predicted decay + recovered 1D model — two-panel diagnostic."""
+    """Observed vs predicted decay + recovered 1D model — two-panel diagnostic.
+
+    gate_used (#93): mask of gates the misfit actually used; finite gates outside
+    it (censored near-floor / negative) are drawn as open grey markers so fitted
+    and displayed-but-ignored data are distinguishable.
+    """
     t = np.asarray(gate_times_ms, dtype=float)
-    use = np.isfinite(d_obs) & (d_obs > 0)
+    finite_pos = np.isfinite(d_obs) & (d_obs > 0)
+    use = finite_pos if gate_used is None else (finite_pos & gate_used)
 
     fig = make_subplots(rows=1, cols=2, subplot_titles=("Decay fit", "1D model"))
 
@@ -247,11 +254,25 @@ def plotly_sounding_fit(
             x=t[use], y=d_obs[use],
             mode="markers",
             marker=dict(color="black", size=5),
-            name="observed",
+            name="observed (fit)",
             hovertemplate="t=%{x:.3f} ms<br>obs=%{y:.2e}<extra></extra>",
         ),
         row=1, col=1,
     )
+    if gate_used is not None:
+        excl = np.isfinite(d_obs) & ~np.asarray(gate_used, dtype=bool)
+        if excl.any():
+            fig.add_trace(
+                go.Scatter(
+                    x=t[excl], y=np.abs(d_obs[excl]),
+                    mode="markers",
+                    marker=dict(symbol="circle-open", color="gray", size=6),
+                    name="excluded (censored/negative)",
+                    hovertemplate=("t=%{x:.3f} ms<br>|obs|=%{y:.2e}<br>"
+                                   "NOT used in the fit<extra></extra>"),
+                ),
+                row=1, col=1,
+            )
     fig.add_trace(
         go.Scatter(
             x=t, y=d_pred,

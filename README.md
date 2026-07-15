@@ -64,6 +64,16 @@ python scripts/generate_synthetic.py --out data/synthetic_survey.csv
 
 For library-API usage (no CLI), see [examples/](examples/).
 
+### Validating an unknown deliverable
+
+When a survey arrives from a new contractor/format, run the acceptance harness **before** any processing (#95):
+
+```bash
+python scripts/validate_deliverable.py --csv survey.csv --config sidecar.json [--json report.json]
+```
+
+It checks schema/units/enums, column coverage, null census, amplitude plausibility vs V/(A·m⁴), decay slope, lat/lon-vs-EPSG consistency, QC flag rate, and a forward-model order-of-magnitude overlay. Exit code 0 = accept, 1 = warnings, 2 = investigate before trusting anything downstream.
+
 ## Web UI
 
 A Streamlit browser interface wraps the full pipeline — upload a CSV + JSON sidecar, run QC and inversion, and explore results interactively without touching the CLI.
@@ -139,6 +149,16 @@ python scripts/ingest_flight.py --flight data/flights/F_SYNTH_01 \
 - **Inversion:** Occam-style — log-space data misfit + `alpha_s` reference-model damping + `alpha_z` vertical first-difference smoothing, solved bounded with scipy Trust Region Reflective. Layer interfaces are fixed and log-spaced (`depth_min_m` → `depth_max_m`, `n_layers`; the last layer is a basal half-space starting at `depth_max_m`).
 - **Stitching:** soundings are inverted in along-line order, each warm-started from its neighbour's solution — cheap lateral continuity. The cold reference model is always also run and the better-fitting of the two is kept, so results don't depend on flight direction (#62); the misfit is the error-normalized `chi` (chi ≈ 1 = fit to assigned errors). True 2D/LCI regularization is Phase 2.
 - **Sections:** `plot_section` hangs each sounding's layer column from its own ground elevation (GPS elevation − bird height), so topography is honoured. Colormap is reversed turbo — red = conductive, per EM convention.
+
+## Known limitations — how to read a section
+
+The pipeline is a good **anomaly-finder** and a not-yet-trustworthy **absolute-measurement instrument**. Three limits travel with every section (#94):
+
+1. **IP / chargeable ground is censored, not inverted.** QC and the forward deliberately preserve signed late-time data, but the inversion's misfit currently drops all negative gates before fitting (#78). Over clay-rich or chargeable cover, deep conductive features are suspect: the censoring biases surviving late gates high → spuriously conductive basements.
+2. **Below-DOI cells show the prior, not a result.** The section plot fades them and `below_doi` flags them in the model CSV, but the resistivity *value* there is essentially `rho_initial` bent by regularization — do not pick "basement contacts" beneath the DOI line. `rho_sd` can also look confident on prior-pinned deep layers (#81).
+3. **Positions and depths lack layback/lever-arm correction** (#70). On a real flight the bird trails ~20–30 m behind and hangs ~15–25 m below the GPS antenna; along-track error flips sign with heading (adjacent lines mis-tie ~40–50 m) and the vertical offset propagates into depth-to-conductor. Must be resolved before interpreting real (non-synthetic) surveys.
+
+Also worth knowing: `chi ≈ 1` means "fit to the assigned errors under the regularization," not a strict reduced-χ² (few gates constrain many layers, #81); and warm-start stitching retains a small flight-direction dependence (#82).
 
 ## Running tests
 
