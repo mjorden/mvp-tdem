@@ -26,6 +26,18 @@ tx:
   ramp_off_us: 800      # linear turn-off ramp (#52); gate times are referenced
                         # to the END of this ramp
 
+# Tow geometry (#70): where the EM bird hangs relative to the GPS antenna.
+# Applied as a static lever-arm/layback correction in ingest — the bird is
+# layback_m BEHIND the antenna along the flight track and drop_m BELOW it.
+# EXPLICIT ZEROS mean "antenna is at the bird" (true only for a rigid boom or
+# the synthetic generator, which simulates the bird directly).
+# MEASURE AND SET BEFORE THE FIRST REAL FLIGHT — typical helicopter tow cables
+# give layback ~20-30 m and drop ~15-25 m. Omitting this block entirely
+# triggers a loud warning at ingest.
+tow:
+  layback_m: 0.0
+  drop_m: 0.0
+
 # V/(A·m⁴), same units as calibrated gate data
 noise_floor: 1.0e-12
 
