@@ -95,6 +95,7 @@ def stack_soundings(
 
     stacked = np.empty((n_full, n_gates))
     se      = np.empty((n_full, n_gates))
+    outlier_frac = np.empty(n_full)          # #71.7: pre-stack sferic diagnostic
     n_unbalanced = 0
 
     for w in range(n_full):
@@ -126,6 +127,14 @@ def stack_soundings(
         n_kept = max(len(pairs_w) - 2 * int(trim_frac * len(pairs_w)), 1)
         se[w] = 1.4826 * mad / np.sqrt(n_kept)
 
+        # #71.7: fraction of pair samples deviating > 4σ from the window median —
+        # a pre-stack sferic/powerline diagnostic. The trim survives ~trim_frac
+        # of hits per tail; in high-sferic season more leak through, and this
+        # metric (exported as `outlier_frac`, consumed by nothing downstream —
+        # it's for humans and provenance) says how hard the trim was working.
+        sig = np.maximum(1.4826 * mad, 1e-300)
+        outlier_frac[w] = float(np.mean(np.abs(pairs_w - med) > 4.0 * sig))
+
     # floor the robust SE so a quiet/quantized gate (MAD == 0) does not report a
     # zero standard error — a downstream consumer using it directly as an
     # inverse-variance weight would otherwise divide by zero (#3). Floored at a
@@ -143,7 +152,17 @@ def stack_soundings(
     if tx_frequency_hz:
         t_centre = t_centre + 0.5 / (2.0 * tx_frequency_hz)   # start-stamp → centre
 
-    out = pd.DataFrame({"t_utc": t_centre, "n_used": n_stack})
+    high = outlier_frac > 0.10
+    if high.any():
+        warnings.warn(
+            f"[stack] {int(high.sum())}/{n_full} windows have >10% of pre-stack "
+            "samples beyond 4σ (sferics/powerline); the trimmed mean may be "
+            "leaking interference into those soundings.",
+            stacklevel=2,
+        )
+
+    out = pd.DataFrame({"t_utc": t_centre, "n_used": n_stack,
+                        "outlier_frac": outlier_frac})
     for i in range(n_gates):
         out[f"gate_{i:02d}"]     = stacked[:, i]
         out[f"gate_std_{i:02d}"] = se[:, i]

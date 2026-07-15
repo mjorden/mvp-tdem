@@ -64,6 +64,7 @@ def ingest_flight(flight_dir: str | Path, instrument: dict, survey_cfg: dict) ->
     txcur, lines_df = frames["txcur"], frames["lines"]
 
     _assert_time_standards_agree(sync_df, gps, ing.get("allow_time_offset", False))
+    gps_quality = _gps_quality_summary(gps)         # #71.3 (None if no quality cols)
 
     df = stack_and_locate(em, gps, alt, txcur, lines_df, instrument, survey_cfg,
                           n_stack=n_stack, trim_frac=trim_frac, max_gap_s=max_gap_s)
@@ -82,9 +83,43 @@ def ingest_flight(flight_dir: str | Path, instrument: dict, survey_cfg: dict) ->
         },
         "moment": df.attrs["moment_mode"],
         "tow": instrument.get("tow") or "NOT SPECIFIED (antenna == bird assumed)",
+        "gps_quality": gps_quality or "no quality columns in GPS log",
         "line_assignment": "operator_log" if lines_df is not None else "heading_auto",
     }
     return df, provenance
+
+
+def _gps_quality_summary(gps, max_hdop: float = 5.0, min_fix: int = 3,
+                         bad_frac_warn: float = 0.05) -> dict | None:
+    """
+    GPS quality metadata check (#71.3): a float-solution segment is otherwise
+    indistinguishable from RTK. Readers pass every column through, so if the
+    GPS log carries hdop / fix / nsat they land here; warn when a meaningful
+    fraction of the stream is degraded, and record the stats in provenance.
+    Returns None when no quality columns exist (quality unknown — also recorded).
+    """
+    import warnings
+    cols = [c for c in ("hdop", "fix", "nsat") if c in getattr(gps, "columns", [])]
+    if not cols:
+        return None
+    out: dict = {}
+    n = len(gps)
+    if "hdop" in cols:
+        frac = float((gps["hdop"] > max_hdop).mean())
+        out["hdop_median"] = float(gps["hdop"].median())
+        out["frac_hdop_gt_max"] = round(frac, 4)
+        if frac > bad_frac_warn:
+            warnings.warn(f"[gps] {100*frac:.1f}% of GPS samples have HDOP > "
+                          f"{max_hdop} — degraded positioning.", stacklevel=2)
+    if "fix" in cols:
+        frac = float((gps["fix"] < min_fix).mean())
+        out["frac_fix_below_min"] = round(frac, 4)
+        if frac > bad_frac_warn:
+            warnings.warn(f"[gps] {100*frac:.1f}% of GPS samples have fix type < "
+                          f"{min_fix} (float/autonomous, not RTK/DGPS).", stacklevel=2)
+    if "nsat" in cols:
+        out["nsat_min"] = int(gps["nsat"].min())
+    return out
 
 
 def _assert_time_standards_agree(sync_df, gps, allow_time_offset: bool,

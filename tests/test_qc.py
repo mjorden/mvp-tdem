@@ -233,6 +233,100 @@ def test_monotonic_not_flagged():
 
 
 # ---------------------------------------------------------------------------
+# station spacing / altitude-amplitude / stack scatter / crossovers (#71)
+# ---------------------------------------------------------------------------
+
+def test_station_spacing_flags_hover_and_gap():
+    from tdem.qc import _station_spacing_flag
+    df = _make_sounding(n=30)                       # uniform 50 m spacing
+    e = df["easting"].to_numpy(float).copy()
+    e[10] = e[9] + 1.0                              # hover: 1 m step
+    e[11:] = e[11:] + 300.0                         # 300+ m gap into sounding 11
+    df["easting"] = e
+    df = _station_spacing_flag(df)
+    assert df.loc[10, "_qc_spacing"]                # hover flagged
+    assert df.loc[11, "_qc_spacing"]                # gap flagged
+    assert not df.loc[5, "_qc_spacing"]             # uniform stretch clean
+
+
+def test_station_spacing_adaptive_no_false_positives():
+    """Uniform spacing at ANY scale must not flag (thresholds are relative)."""
+    from tdem.qc import _station_spacing_flag
+    df = _make_sounding(n=30)
+    df["easting"] = 5e5 + np.arange(30) * 200.0     # 200 m survey — no assumption
+    df = _station_spacing_flag(df)
+    assert not df["_qc_spacing"].any()
+
+
+def test_altitude_amplitude_flags_wrong_altitude():
+    from tdem.qc import _altitude_amplitude_flag
+    from tdem.load import gate_columns
+    rng = np.random.default_rng(3)
+    n = 60
+    df = _make_sounding(n=n)
+    gcols = gate_columns(df)
+    dem = 25.0 + 20.0 * rng.random(n)               # 25-45 m altitude spread
+    df["dem"] = dem
+    # amplitude follows a clean altitude trend...
+    for c in gcols:
+        df[c] = df[c] * 10 ** (-0.02 * (dem - 35.0))
+    # ...except one sounding whose recorded altitude is wrong by +30 m
+    df.loc[7, "dem"] = dem[7] + 30.0
+    df = _altitude_amplitude_flag(df, gcols)
+    assert df.loc[7, "_qc_alt_amp"]
+    assert df["_qc_alt_amp"].sum() <= 3             # few false positives
+
+
+def test_stack_scatter_flags_interference():
+    from tdem.qc import _stack_scatter_flag
+    from tdem.load import gate_columns
+    df = _make_sounding(n=30)
+    gcols = gate_columns(df)
+    for c in gcols:                                  # clean 1% relative scatter
+        df[f"sfz_std_{c.split('_')[-1]}"] = 0.01 * df[c].abs()
+    for c in gcols:                                  # sounding 12: 50x scatter
+        df.loc[12, f"sfz_std_{c.split('_')[-1]}"] = 0.5 * abs(df.loc[12, c])
+    df = _stack_scatter_flag(df, gcols)
+    assert df.loc[12, "_qc_stack_scatter"]
+    assert df["_qc_stack_scatter"].sum() == 1
+
+
+def test_stack_scatter_skipped_without_std_columns():
+    from tdem.qc import _stack_scatter_flag
+    from tdem.load import gate_columns
+    df = _make_sounding(n=10)
+    df = _stack_scatter_flag(df, gate_columns(df))
+    assert not df["_qc_stack_scatter"].any()
+
+
+def test_crossover_stats_finds_intersection():
+    """A tie line crossing a traverse mid-way reports the amplitude misfit there."""
+    from tdem.qc import crossover_stats
+    n = 21
+    df_a = _make_sounding(n=n, line=1000)            # E-W at northing 4900000
+    df_a["easting"] = 5e5 + np.arange(n) * 50.0
+    df_a["northing"] = 4.9e6
+    df_b = _make_sounding(n=n, line=9000)            # N-S tie through the middle
+    df_b["easting"] = 5e5 + 500.0
+    df_b["northing"] = 4.9e6 - 500.0 + np.arange(n) * 50.0
+    df = pd.concat([df_a, df_b], ignore_index=True)
+    x = crossover_stats(df)
+    assert len(x) == 1
+    assert x.iloc[0]["line_a"] == 1000 and x.iloc[0]["line_b"] == 9000
+    assert x.iloc[0]["easting"] == pytest.approx(5e5 + 500.0, abs=1.0)
+    # identical decays on both lines → misfit ~0
+    assert abs(x.iloc[0]["rel_diff"]) < 1e-9
+
+
+def test_crossover_stats_empty_for_parallel_lines():
+    from tdem.qc import crossover_stats
+    df_a = _make_sounding(n=10, line=1000); df_a["northing"] = 4.9e6
+    df_b = _make_sounding(n=10, line=1010); df_b["northing"] = 4.9e6 + 200.0
+    df = pd.concat([df_a, df_b], ignore_index=True)
+    assert len(crossover_stats(df)) == 0
+
+
+# ---------------------------------------------------------------------------
 # run_qc / integration
 # ---------------------------------------------------------------------------
 

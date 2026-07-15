@@ -283,6 +283,29 @@ def test_calibrate_window_average_de_aliases_current():
     assert out.loc[0, "gate_00"] == pytest.approx(1e-3, rel=1e-6)
 
 
+def test_despike_stream_heals_spike_keeps_trend():
+    """#71.2: an isolated altimeter spike is median-replaced; real terrain-
+    following trends survive untouched."""
+    from tdem.ingest.merge import despike_stream
+    v = 30.0 + np.linspace(0, 10, 60)                # climbing terrain follow
+    v[25] = 300.0                                    # canopy/water lock-on spike
+    out = despike_stream(v)
+    assert abs(out[25] - (30.0 + 25 * 10 / 59)) < 1.0    # healed to local median
+    assert np.allclose(out[:20], v[:20])                 # trend untouched
+
+
+def test_merge_nav_despikes_altimeter():
+    from tdem.ingest.merge import merge_nav
+    n = 40
+    t = T0 + np.arange(n, dtype=float)
+    gps = pd.DataFrame({"t_utc": t, "lat": 44.0, "lon": -119.0, "h_ell": 1400.0})
+    agl = np.full(n, 35.0); agl[20] = 400.0          # single radar spike
+    alt = pd.DataFrame({"t_utc": t, "agl_m": agl})
+    s = pd.DataFrame({"t_utc": [T0 + 20.0]})         # sounding right at the spike
+    out = merge_nav(s, gps, alt)
+    assert out.loc[0, "agl_m"] == pytest.approx(35.0, abs=0.5)
+
+
 # ---------------------------------------------------------------------------
 # merge
 # ---------------------------------------------------------------------------

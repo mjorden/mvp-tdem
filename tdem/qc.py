@@ -15,6 +15,15 @@ Operations (applied in order by run_qc)
 4. dem_consistency     — flag soundings where DEM > Elevation (GPS/radar mismatch)
 5. along_line_despike  — lateral median filter; kills narrow along-line spikes per gate
 6. monotonicity_flag   — flag soundings whose early-time gates are non-monotonic
+7. station_spacing     — hover / nav-dropout via spacing relative to the line's
+                         own median (adaptive; no survey-speed assumption, #71.5)
+8. altitude_amplitude  — per-line log-amplitude vs altitude regression residuals
+                         (altimeter error / calibration drift, #71.6)
+9. stack_scatter       — powerline/sferic proxy from the stacked robust SE
+                         (needs sfz_std_* columns, #71.1/.7)
+
+`crossover_stats(df)` (not part of run_qc) reports amplitude misfits at line
+crossings — tie-line leveling QC (#71.4).
                          (powerline / cultural EM contamination indicator)
 
 Each operation writes a boolean mask column (True = bad) into a `_qc_*` namespace.
@@ -100,6 +109,9 @@ def run_qc(
                              despike_min_gates, noise_floor=noise_floor)
     df = _monotonicity_flag(df, gate_cols, mono_n_early, mono_max_reversals,
                             noise_floor=noise_floor)
+    df = _station_spacing_flag(df)
+    df = _altitude_amplitude_flag(df, gate_cols)
+    df = _stack_scatter_flag(df, gate_cols)
 
     df["sounding_mask"] = _combine_sounding_flags(df)
 
@@ -363,6 +375,200 @@ def _monotonicity_flag(
     nonmono |= n_valid < min_valid_early
     df["_qc_nonmono"] = nonmono
     return df
+
+
+def _station_spacing_flag(
+    df: pd.DataFrame,
+    min_frac: float = 0.2,
+    max_frac: float = 3.0,
+) -> pd.DataFrame:
+    """
+    Flag hover / nav-dropout soundings by along-line station spacing (#71.5).
+
+    Spacing thresholds are ADAPTIVE — fractions of each line's own median
+    spacing — so the check carries no survey-speed assumption (the G13 lesson:
+    hardcoded metre thresholds silently encode one survey's geometry).
+
+    spacing < min_frac·median → hover / repeated position (footprint overlap,
+    stacking redundancy); spacing > max_frac·median → nav dropout or a gap the
+    interpolation glossed over. First sounding of a line takes its following
+    spacing.
+    """
+    flag = np.zeros(len(df), dtype=bool)
+    if {"easting", "northing"} <= set(df.columns):
+        lines = df["line"].unique() if "line" in df.columns else [None]
+        for line_id in lines:
+            pos = np.where(df["line"] == line_id)[0] if line_id is not None \
+                else np.arange(len(df))
+            if len(pos) < 3:
+                continue
+            e = df["easting"].to_numpy(dtype=float)[pos]
+            n = df["northing"].to_numpy(dtype=float)[pos]
+            gap = np.hypot(np.diff(e), np.diff(n))         # spacing to previous
+            med = np.nanmedian(gap)
+            if not np.isfinite(med) or med <= 0:
+                continue
+            bad_gap = (gap < min_frac * med) | (gap > max_frac * med)
+            # attribute a bad gap to the LATER sounding of the pair
+            flag[pos[1:]] |= bad_gap
+    df["_qc_spacing"] = flag
+    return df
+
+
+def _altitude_amplitude_flag(
+    df: pd.DataFrame,
+    gate_cols: list[str],
+    n_early: int = 3,
+    k_sigma: float = 4.0,
+    min_soundings: int = 20,
+    min_alt_range_m: float = 5.0,
+) -> pd.DataFrame:
+    """
+    Altitude-corrected amplitude check (#71.6): per line, regress
+    log|early-gate amplitude| against bird altitude and flag residual outliers.
+
+    Early-gate amplitude falls predictably with bird height; a sounding whose
+    amplitude is wildly off the line's own amplitude-vs-altitude trend has
+    either a wrong altitude (altimeter error the DEM-jump check missed —
+    e.g. canopy lock) or a calibration/gain glitch.
+
+    The regression residual also contains GEOLOGY (a conductor changes early
+    amplitude far more than altitude does), so the residual is HIGH-PASSED
+    along the line — a rolling median removes spatially-coherent geological
+    signal, leaving only pointwise altitude/calibration errors to threshold.
+    Without this, every sounding over an anomaly gets flagged (verified on the
+    synthetic conductor before shipping). Skipped when the line's altitude
+    range is < min_alt_range_m (regression degenerate — constant-height
+    synthetic surveys are exempt by construction).
+    """
+    flag = np.zeros(len(df), dtype=bool)
+    early = df[gate_cols[:max(1, n_early)]].to_numpy(dtype=float)
+    amp = np.nanmean(np.abs(early), axis=1)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        log_amp = np.where(amp > 0, np.log10(np.where(amp > 0, amp, 1.0)), np.nan)
+    dem = df["dem"].to_numpy(dtype=float) if "dem" in df.columns else None
+
+    if dem is not None:
+        lines = df["line"].unique() if "line" in df.columns else [None]
+        for line_id in lines:
+            pos = np.where(df["line"] == line_id)[0] if line_id is not None \
+                else np.arange(len(df))
+            ok = pos[np.isfinite(log_amp[pos]) & np.isfinite(dem[pos])]
+            if len(ok) < min_soundings:
+                continue
+            if np.ptp(dem[ok]) < min_alt_range_m:
+                continue                     # constant-height: trend unresolvable
+            slope, icept = np.polyfit(dem[ok], log_amp[ok], 1)
+            resid = log_amp[ok] - (slope * dem[ok] + icept)
+            # high-pass: geology is spatially coherent, altimeter/cal errors
+            # are pointwise — threshold the deviation from the local median
+            resid_hp = resid - _rolling_median(resid, half_window=7)
+            mad = np.median(np.abs(resid_hp - np.median(resid_hp)))
+            sigma = max(1.4826 * mad, 1e-6)
+            flag[ok] |= np.abs(resid_hp) > k_sigma * sigma
+    df["_qc_alt_amp"] = flag
+    return df
+
+
+def _stack_scatter_flag(
+    df: pd.DataFrame,
+    gate_cols: list[str],
+    k_median: float = 5.0,
+) -> pd.DataFrame:
+    """
+    Powerline/sferic-contamination proxy from stacking scatter (#71.1/#71.7).
+
+    60 Hz interference does not coherently cancel in a 25 Hz bipolar stack
+    (28.8 cycles per 0.48 s window), and heavy sferic seasons overwhelm the
+    trimmed mean — both inflate the per-gate robust SE the stack exports
+    (sfz_std_*). A sounding whose median relative scatter (std/|value|) is
+    k_median× the LINE median is flagged as interference-contaminated.
+    Requires the sfz_std_* columns (own-instrument ingest); silently skipped
+    for deliverables without them. A true PLM channel / notch needs monitor
+    hardware and stays future work.
+    """
+    from .load import gate_std_columns
+    std_cols = gate_std_columns(df)
+    flag = np.zeros(len(df), dtype=bool)
+    if std_cols and len(std_cols) == len(gate_cols):
+        vals = df[gate_cols].to_numpy(dtype=float)
+        stds = df[std_cols].to_numpy(dtype=float)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            rel = np.where(np.abs(vals) > 0, stds / np.abs(vals), np.nan)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            r = np.nanmedian(rel, axis=1)              # per-sounding rel scatter
+        lines = df["line"].unique() if "line" in df.columns else [None]
+        for line_id in lines:
+            pos = np.where(df["line"] == line_id)[0] if line_id is not None \
+                else np.arange(len(df))
+            med = np.nanmedian(r[pos])
+            if np.isfinite(med) and med > 0:
+                flag[pos] = r[pos] > k_median * med
+    df["_qc_stack_scatter"] = flag
+    return df
+
+
+# ---------------------------------------------------------------------------
+# Tie-line / crossover statistics (#71.4) — analysis, not a flag
+# ---------------------------------------------------------------------------
+
+def crossover_stats(df: pd.DataFrame, n_early: int = 3) -> pd.DataFrame:
+    """
+    Amplitude misfit at line-crossing points — the standard leveling QC (#71.4).
+
+    Finds every geometric intersection between soundings of different lines
+    (segment-segment, so tie lines vs traverse lines fall out naturally),
+    interpolates the mean early-gate amplitude of each line to the crossing
+    point, and reports the relative difference. Systematic per-line offsets
+    indicate drift/leveling problems (#69); random scatter estimates repeat
+    accuracy.
+
+    Returns a DataFrame with one row per crossing:
+        line_a, line_b, easting, northing, amp_a, amp_b, rel_diff
+    (empty if no crossings). Summary: crossover_stats(df)["rel_diff"].abs().median().
+    """
+    from .load import gate_columns as _gc
+    gate_cols = _gc(df)[:max(1, n_early)]
+    amp = np.nanmean(np.abs(df[gate_cols].to_numpy(dtype=float)), axis=1)
+
+    rows = []
+    lines = [l for l in df["line"].unique()] if "line" in df.columns else []
+    for i, la in enumerate(lines):
+        A = df[df["line"] == la]
+        ea, na = A["easting"].to_numpy(float), A["northing"].to_numpy(float)
+        aa = amp[df["line"].to_numpy() == la]
+        for lb in lines[i + 1:]:
+            B = df[df["line"] == lb]
+            eb, nb = B["easting"].to_numpy(float), B["northing"].to_numpy(float)
+            ab = amp[df["line"].to_numpy() == lb]
+            for j in range(len(A) - 1):
+                p, r = np.array([ea[j], na[j]]), np.array([ea[j+1]-ea[j], na[j+1]-na[j]])
+                for k in range(len(B) - 1):
+                    q, s = np.array([eb[k], nb[k]]), np.array([eb[k+1]-eb[k], nb[k+1]-nb[k]])
+                    denom = r[0]*s[1] - r[1]*s[0]
+                    if abs(denom) < 1e-12:
+                        continue                      # parallel segments
+                    qp = q - p
+                    t = (qp[0]*s[1] - qp[1]*s[0]) / denom
+                    u = (qp[0]*r[1] - qp[1]*r[0]) / denom
+                    # half-open [0,1): a crossing exactly at a shared sounding
+                    # vertex belongs to ONE segment per line, not to all four
+                    # adjacent pairs (which would quadruple-count it)
+                    if not (0.0 <= t < 1.0 and 0.0 <= u < 1.0):
+                        continue
+                    x, y = p + t * r
+                    amp_a = (1-t)*aa[j] + t*aa[j+1]
+                    amp_b = (1-u)*ab[k] + u*ab[k+1]
+                    mean_amp = 0.5 * (amp_a + amp_b)
+                    if not np.isfinite(mean_amp) or mean_amp <= 0:
+                        continue
+                    rows.append({"line_a": la, "line_b": lb,
+                                 "easting": x, "northing": y,
+                                 "amp_a": amp_a, "amp_b": amp_b,
+                                 "rel_diff": (amp_a - amp_b) / mean_amp})
+    return pd.DataFrame(rows, columns=["line_a", "line_b", "easting", "northing",
+                                       "amp_a", "amp_b", "rel_diff"])
 
 
 # ---------------------------------------------------------------------------
