@@ -58,6 +58,11 @@ _Z_INV = layer_depths(forward_from_config(_CONFIG).thicknesses)
 
 _NOISE_FLOOR = _CONFIG["system"]["system_noise_floor"]
 
+from pyproj import Transformer
+
+_TO_WGS84 = Transformer.from_crs(
+    f"EPSG:{_CONFIG['survey']['epsg']}", "EPSG:4326", always_xy=True)
+
 
 def truth_model(in_body: bool) -> np.ndarray:
     """Fine-mesh resistivity model: 200 Ω·m background, optional 5 Ω·m body 20–80 m."""
@@ -106,6 +111,10 @@ def main():
             addn = rng.normal(0, _NOISE_FLOOR, size=len(clean))
             signal = clean + mult + addn
 
+            # lat/lon must be the true inverse projection of easting/northing
+            # under the declared EPSG — the acceptance harness (#95) cross-checks
+            # them, and the old hand-rolled placeholders were ~190 km off
+            lon, lat = _TO_WGS84.transform(easting, northing)
             row = {
                 "LINE":     line_id,
                 "FID":      fid,
@@ -113,8 +122,8 @@ def main():
                 "Northing": round(northing, 2),
                 "Elevation": round(elev, 2),
                 "DEM":      round(dem, 2),
-                "Latitude": round(44.2 + j * 0.0004, 6),
-                "Longitude": round(-119.4 + i * 0.002, 6),
+                "Latitude": round(lat, 6),
+                "Longitude": round(lon, 6),
             }
             for k, val in enumerate(signal):
                 row[f"SFz[{k}]"] = f"{val:.6e}"

@@ -64,6 +64,16 @@ python scripts/generate_synthetic.py --out data/synthetic_survey.csv
 
 For library-API usage (no CLI), see [examples/](examples/).
 
+### Validating an unknown deliverable
+
+When a survey arrives from a new contractor/format, run the acceptance harness **before** any processing (#95):
+
+```bash
+python scripts/validate_deliverable.py --csv survey.csv --config sidecar.json [--json report.json]
+```
+
+It checks schema/units/enums, column coverage, null census, amplitude plausibility vs V/(A·m⁴), decay slope, lat/lon-vs-EPSG consistency, QC flag rate, and a forward-model order-of-magnitude overlay. Exit code 0 = accept, 1 = warnings, 2 = investigate before trusting anything downstream.
+
 ## Web UI
 
 A Streamlit browser interface wraps the full pipeline — upload a CSV + JSON sidecar, run QC and inversion, and explore results interactively without touching the CLI.
