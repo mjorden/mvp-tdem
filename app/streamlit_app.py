@@ -593,6 +593,31 @@ Install the optional Plotly image renderer: `pip install kaleido`.
 It is included in the `[ui]` optional dependency group.
 """)
 
+    # ── Known limitations ─────────────────────────────────────────────────────
+    with st.expander("⚠️ Known limitations — how to read results", expanded=False):
+        st.markdown("""
+This pipeline is a good **anomaly-finder** and a not-yet-trustworthy
+**absolute-measurement instrument**. Keep three limits in mind:
+
+1. **IP / chargeable ground is censored, not inverted.** The inversion drops
+   negative late-time gates before fitting, so over clay-rich or chargeable
+   cover, deep conductive features are suspect — the censoring biases
+   surviving late gates high (spuriously conductive basements).
+2. **Below-DOI cells show the prior, not a result.** The faded region of the
+   section (and `below_doi` in the model CSV) marks cells whose resistivity is
+   essentially the starting model bent by regularization. Do not pick
+   "basement contacts" beneath the DOI line.
+3. **Positions and depths lack layback/lever-arm correction.** On a real
+   flight the bird trails ~20–30 m behind and ~15–25 m below the GPS antenna;
+   adjacent lines flown in opposite directions can mis-tie by ~40–50 m, and
+   the vertical offset shifts depth-to-conductor. Synthetic data is
+   unaffected; real surveys need the correction first.
+
+Also: chi ≈ 1 means "fit to assigned errors under the regularization," not a
+strict statistical reduced-χ² — a handful of gates cannot uniquely constrain
+30 layers.
+""")
+
     st.divider()
     st.caption(
         "Source code: [github.com/mjorden/mvp-tdem](https://github.com/mjorden/mvp-tdem)  ·  "
