@@ -203,24 +203,33 @@ def plot_sounding_fit(
     """Two-panel diagnostic: decay fit (left) and recovered 1D model (right).
 
     gate_used (#93): per-gate mask of what the misfit actually used
-    (SoundingResult.gate_used). Finite gates OUTSIDE the mask — censored
-    near-floor / negative values that pass QC but are never fit — are drawn as
-    open grey circles so the interpreter can tell fitted data from displayed-
-    but-ignored data. Without the mask, behavior is unchanged.
+    (SoundingResult.gate_used). Finite gates OUTSIDE the mask — near-floor
+    values censored regardless of sign (#78) — are drawn as open grey circles.
+    USED negative gates (real IP/bipolar signal, inverted via the asinh
+    transform) are drawn as open blue diamonds at |value| so the log axis can
+    show them while keeping their sign visible. Without the mask, behavior is
+    the legacy positives-only view.
     """
     t = np.asarray(gate_times_ms, dtype=float)
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 5))
 
-    finite_pos = np.isfinite(d_obs) & (d_obs > 0)
-    use = finite_pos if gate_used is None else (finite_pos & gate_used)
-    ax1.loglog(t[use], d_obs[use], "ko", ms=5, label="observed (fit)")
-    if gate_used is not None:
-        excl = np.isfinite(d_obs) & ~gate_used
+    if gate_used is None:
+        use_pos = np.isfinite(d_obs) & (d_obs > 0)
+        ax1.loglog(t[use_pos], d_obs[use_pos], "ko", ms=5, label="observed (fit)")
+    else:
+        finite = np.isfinite(d_obs)
+        used_pos = finite & gate_used & (d_obs > 0)
+        used_neg = finite & gate_used & (d_obs < 0)
+        excl = finite & ~gate_used
+        ax1.loglog(t[used_pos], d_obs[used_pos], "ko", ms=5, label="observed (fit)")
+        if used_neg.any():
+            ax1.loglog(t[used_neg], np.abs(d_obs[used_neg]), "D", ms=5, mfc="none",
+                       mec="tab:blue", label="observed negative (fit, |value|)")
         if excl.any():
             ax1.loglog(t[excl], np.abs(d_obs[excl]), "o", ms=5, mfc="none",
-                       mec="0.6", label="excluded (censored/negative)")
-    ax1.loglog(t, d_pred, "r-", lw=1.5, label="predicted")
+                       mec="0.6", label="excluded (near-floor)")
+    ax1.loglog(t, np.abs(d_pred), "r-", lw=1.5, label="predicted")
     ax1.set_xlabel("Time (ms)")
     ax1.set_ylabel("|dB/dt|  (V/(A·m⁴))")
     ax1.legend()

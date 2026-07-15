@@ -17,7 +17,7 @@ import yaml
 from . import readers
 from .calibrate import calibrate
 from .emit import emit_survey, file_digest
-from .geometry import assign_fids, assign_lines, elevations, project
+from .geometry import apply_layback, assign_fids, assign_lines, elevations, project
 from .merge import merge_nav
 from .timesync import apply_clock, fit_clock
 
@@ -81,6 +81,7 @@ def ingest_flight(flight_dir: str | Path, instrument: dict, survey_cfg: dict) ->
             "n_pairs": clock.n_pairs,
         },
         "moment": df.attrs["moment_mode"],
+        "tow": instrument.get("tow") or "NOT SPECIFIED (antenna == bird assumed)",
         "line_assignment": "operator_log" if lines_df is not None else "heading_auto",
     }
     return df, provenance
@@ -125,7 +126,26 @@ def stack_and_locate(em, gps, alt, txcur, lines_df, instrument, survey_cfg,
     window_s = n_stack / (2.0 * f_tx) if f_tx else 0.0
     df, moment_mode = calibrate(df, instrument, txcur, max_gap_s=max_gap_s, window_s=window_s)
     df = merge_nav(df, gps, alt, max_gap_s=max_gap_s)
-    df = project(df, epsg=survey_cfg["survey"]["epsg"])
+    epsg = survey_cfg["survey"]["epsg"]
+    df = project(df, epsg=epsg)
+
+    # static layback / lever-arm (#70): antenna position → bird position.
+    # An instrument config WITHOUT a tow block gets a loud reminder — the
+    # correction is unconditional on real flights (~20-30 m horizontal,
+    # ~15-25 m vertical); explicit zeros (rigid boom / simulated bird) silence it.
+    tow = instrument.get("tow")
+    if tow is None:
+        import warnings
+        warnings.warn(
+            "[geometry] instrument.yaml has no `tow` block — positions assume the "
+            "GPS antenna is AT the bird. Set tow.layback_m / tow.drop_m (explicit "
+            "zeros for a rigid boom) before the first real flight (#70).",
+            stacklevel=2,
+        )
+    else:
+        df = apply_layback(df, layback_m=tow.get("layback_m", 0.0),
+                           drop_m=tow.get("drop_m", 0.0), epsg=epsg)
+
     df = elevations(df, geoid_offset_m=survey_cfg["survey"].get("geoid_offset_m", 0.0))
     df = assign_lines(df, lines_df)
     df.attrs["moment_mode"] = moment_mode

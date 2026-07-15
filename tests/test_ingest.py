@@ -316,6 +316,62 @@ def test_merge_nav_attaches_all_columns():
 # geometry
 # ---------------------------------------------------------------------------
 
+def test_apply_layback_shifts_bird_behind_and_below():
+    """#70: flying north, the bird is layback_m SOUTH of the antenna and drop_m lower."""
+    from tdem.ingest.geometry import apply_layback
+    n = 20
+    df = pd.DataFrame({
+        "easting":  np.full(n, 500_000.0),
+        "northing": 4_900_000.0 + np.arange(n) * 50.0,     # due north track
+        "h_ell":    np.full(n, 1450.0),
+    })
+    out = apply_layback(df, layback_m=30.0, drop_m=20.0)
+    assert np.allclose(out["easting"], 500_000.0, atol=1e-6)
+    assert np.allclose(out["northing"], df["northing"] - 30.0)   # behind = south
+    assert np.allclose(out["h_ell"], 1430.0)                     # below
+
+
+def test_apply_layback_flips_with_heading():
+    """#70: the along-track shift reverses on a reciprocal heading — the source
+    of the ~2x layback line-to-line mis-tie the correction removes."""
+    from tdem.ingest.geometry import apply_layback
+    n = 20
+    east = 500_000.0 + np.arange(n) * 50.0
+    df_e = pd.DataFrame({"easting": east, "northing": np.full(n, 4.9e6),
+                         "h_ell": np.full(n, 1450.0)})
+    df_w = pd.DataFrame({"easting": east[::-1], "northing": np.full(n, 4.9e6),
+                         "h_ell": np.full(n, 1450.0)})
+    out_e = apply_layback(df_e, layback_m=30.0)
+    out_w = apply_layback(df_w, layback_m=30.0)
+    assert np.allclose(out_e["easting"], df_e["easting"] - 30.0)  # flying E → bird W
+    assert np.allclose(out_w["easting"], df_w["easting"] + 30.0)  # flying W → bird E
+
+
+def test_apply_layback_zero_is_identity():
+    from tdem.ingest.geometry import apply_layback
+    df = pd.DataFrame({"easting": [1.0], "northing": [2.0], "h_ell": [3.0]})
+    out = apply_layback(df, layback_m=0.0, drop_m=0.0)
+    assert out.equals(df)
+
+
+def test_apply_layback_reprojects_latlon():
+    """#70/#95: corrected easting/northing must stay consistent with lat/lon."""
+    from pyproj import Transformer
+    from tdem.ingest.geometry import apply_layback
+    n = 10
+    east = np.full(n, 500_000.0)
+    north = 4_900_000.0 + np.arange(n) * 50.0
+    inv = Transformer.from_crs(32611, 4326, always_xy=True)
+    lon, lat = inv.transform(east, north)
+    df = pd.DataFrame({"easting": east, "northing": north,
+                       "lat": lat, "lon": lon, "h_ell": np.full(n, 1450.0)})
+    out = apply_layback(df, layback_m=30.0, epsg=32611)
+    tf = Transformer.from_crs(4326, 32611, always_xy=True)
+    ex, ny = tf.transform(out["lon"].to_numpy(), out["lat"].to_numpy())
+    assert np.allclose(ex, out["easting"], atol=0.01)
+    assert np.allclose(ny, out["northing"], atol=0.01)
+
+
 def test_elevations_and_dem_convention():
     """Repo convention: the DEM column is bird height AGL, not ground elevation."""
     out = elevations(pd.DataFrame({"h_ell": [1380.0], "agl_m": [35.0]}),

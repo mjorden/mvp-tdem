@@ -20,8 +20,10 @@ W_z scales each first-difference row by 1/sqrt(spacing between layer tops)
 (#11) so log-spaced meshes penalize roughness per metre, not per interface —
 without it the shallow model is penalized ~100x harder than the deep model.
 
-Log-space data misfit handles the ~6 decades of decay amplitude; relative
-data errors become additive in log space.
+The data misfit uses the scaled-asinh transform (Farquharson & Oldenburg 1998,
+#78): log-like over the ~6 decades of decay amplitude, linear and smooth through
+zero — so signed late-time gates (IP / bipolar-train effects) are inverted, not
+censored, and relative errors still become ~additive for strong gates.
 
 Line stitching: soundings are inverted in along-line order and each sounding
 is warm-STARTED from its neighbour's solution, but the damping reference
@@ -47,32 +49,39 @@ from .qc import good_gate_array
 
 
 # ---------------------------------------------------------------------------
-# Sign-safe log transform for the data misfit (#53)
+# Symmetric asinh data transform (#78, supersedes the floored-log of #53)
 # ---------------------------------------------------------------------------
 # The forward deliberately returns SIGNED dB/dt so that sign-changing transients
-# (bipolar train / IP) keep a differentiable fold (forward.py, #5). A plain
-# log(max(pred, 1e-300)) misfit throws that away: any trial model predicting a
-# non-positive gate produces a saturated ~10⁴σ residual whose finite-difference
-# gradient is exactly zero, so TRF stalls or wanders (very resistive trials at
-# late gates; warm starts stepping off a conductor onto resistive ground —
-# precisely the regime the chi>2 cold-retry guard exists to catch).
+# (bipolar train / IP) keep a differentiable fold (forward.py, #5). The earlier
+# floored-log misfit was one-sided: it (with the d>censor cut) threw away every
+# negative datum, so the pipeline preserved IP negatives through QC and the
+# forward only to censor them at the misfit — a conductive-deep bias over
+# chargeable ground (#78).
 #
-# We replace it with a C1-continuous "floored log": log(x) above a small
-# per-gate floor eps, continued linearly below eps with the matching slope 1/eps.
-# For any remotely reasonable fit (pred within ~3 decades of the datum) this is
-# identical to log(pred); only as pred approaches zero/negative does it switch to
-# a finite, gradient-carrying penalty that pushes the iterate back toward
-# positive predictions instead of onto a zero-gradient cliff.
+# The scaled inverse-hyperbolic-sine transform (Farquharson & Oldenburg 1998)
+# handles the full signed range in one smooth function:
+#
+#     f(x) = asinh( x / (2s) ),   s = assigned absolute error of the gate
+#
+#   |x| >> s :  f(x) ≈ sign(x)·ln(|x|/s)   — behaves exactly like the log misfit
+#                                            on well-resolved gates (chi values
+#                                            stay comparable to the old ones)
+#   |x| <~ s :  linear in x                — smooth through zero, no cliff, no
+#                                            clamp; gradient never vanishes
+#
+# Error propagation through the transform:  sd(f) = s / sqrt((2s)² + x²),
+# which tends to the relative error s/|x| for strong gates and is bounded at
+# 1/2 near zero — near-floor gates are automatically down-weighted instead of
+# either exploding the weight (old floor/d term) or being sign-censored.
 
-def _log_floored(x: np.ndarray, eps: np.ndarray) -> np.ndarray:
-    """log(x) for x > eps; log(eps) + (x-eps)/eps for x <= eps (C1-continuous)."""
-    safe = np.maximum(x, eps)                       # keep the log branch finite
-    return np.where(x > eps, np.log(safe), np.log(eps) + (x - eps) / eps)
+def _asinh_scaled(x: np.ndarray, s: np.ndarray) -> np.ndarray:
+    """Farquharson-Oldenburg transform: asinh(x / 2s); s = per-gate abs error."""
+    return np.arcsinh(x / (2.0 * s))
 
 
-def _dlog_floored(x: np.ndarray, eps: np.ndarray) -> np.ndarray:
-    """d/dx of _log_floored: 1/x above eps, 1/eps below (never zero)."""
-    return np.where(x > eps, 1.0 / np.maximum(x, eps), 1.0 / eps)
+def _dasinh_scaled(x: np.ndarray, s: np.ndarray) -> np.ndarray:
+    """d/dx asinh(x/2s) = 1/sqrt((2s)² + x²) — strictly positive everywhere."""
+    return 1.0 / np.sqrt((2.0 * s) ** 2 + x ** 2)
 
 
 # ---------------------------------------------------------------------------
@@ -234,8 +243,9 @@ def invert_sounding(
                    (#27). No effect when noise_floor == 0.
     gate_sd      : optional (n_gates,) per-gate absolute standard deviation from
                    stacking (same units as d_obs).  When provided, combined in
-                   quadrature with rel_error (floor) and noise_floor:
-                   sd_log = sqrt(rel_error² + (gate_sd/d)² + (noise_floor/d)²)
+                   quadrature with rel_error and noise_floor into the per-gate
+                   absolute error:
+                   sd_abs = sqrt((rel_error·|d|)² + gate_sd² + noise_floor²)
                    This replaces the flat rel_error model when SFz_std columns
                    are present in the survey CSV (Auken & Christiansen 2004).
 
@@ -243,25 +253,28 @@ def invert_sounding(
     -------
     rho (n_layers,), chi, converged
 
-    chi is the error-normalized misfit (#4):
-        chi = sqrt(mean(((ln pred − ln obs) / sd_log)²))
-    chi ≈ 1 means the data are fit to within their assigned errors.
+    chi is the error-normalized misfit (#4) in the asinh-transformed domain
+    (#78, Farquharson & Oldenburg 1998):
+        chi = sqrt(mean(((f(pred) − f(obs)) / sd_f)²)),  f(x) = asinh(x/2·sd_abs)
+    For gates well above the noise this reduces to the familiar log-space
+    relative misfit, so chi ≈ 1 still means "fit to within assigned errors";
+    signed (IP / bipolar) data are handled without censoring.
     converged is False only if the final cooling stage exhausted its
     evaluation budget mid-descent (#15).
     """
     n = fwd.n_layers
     d_obs = np.asarray(d_obs, dtype=float)
-    # #27: gates whose amplitude is within ~censor_factor× the noise floor are
-    # excluded from the misfit entirely. Near the floor only upward noise
-    # fluctuations survive the d>0 cut, AND sd_log = rel + floor/d shrinks for
-    # those survivors, so the inversion fits systematically inflated late-time
-    # data → spuriously conductive basements. Dropping them removes the bias at
-    # the cost of a little depth of investigation (which DOI already reports).
+    # #27: gates whose AMPLITUDE is within ~censor_factor× the noise floor are
+    # excluded from the misfit — near the floor the datum is dominated by noise
+    # whatever its sign, and keeping it invites the upward-selection bias.
+    # The cut is on |d| (#78): a real IP/bipolar negative with amplitude well
+    # above the floor is genuine signal and IS inverted (via the asinh
+    # transform); the old signed d>censor cut silently discarded it.
     censor = censor_factor * noise_floor if noise_floor > 0 else 0.0
-    use = np.isfinite(d_obs) & (d_obs > censor)
+    use = np.isfinite(d_obs) & (np.abs(d_obs) > censor)
     if use.sum() < min_gates:
         raise ValueError(
-            f"Only {int(use.sum())} usable gates (> {censor:.2e}) — "
+            f"Only {int(use.sum())} usable gates (|d| > {censor:.2e}) — "
             f"need at least {min_gates} to invert.")
 
     def _to_log(rho):
@@ -272,24 +285,24 @@ def invert_sounding(
     lo, hi = np.log10(rho_min), np.log10(rho_max)
     m = np.clip(_to_log(rho_initial), lo, hi)
 
-    # log-space data weights:
-    #   sd(log d) ≈ sqrt(rel_error² + (gate_sd/d)² + (noise_floor/d)²)
-    # rel_error acts as a floor; gate_sd (from stacking) provides per-gate
-    # uncertainty when SFz_std columns are available (#61).
-    log_d = np.log(d_obs[use])
+    # per-gate ABSOLUTE error, combined in quadrature (#61):
+    #   sd_abs = sqrt((rel_error·|d|)² + gate_sd² + noise_floor²)
+    # For strong positive gates sd_abs/|d| equals the old log-space sd, so chi
+    # values are directly comparable with the previous log misfit.
+    d_use = d_obs[use]
     n_use = int(use.sum())
-    std_rel = (np.asarray(gate_sd, dtype=float)[use] / d_obs[use]
-               if gate_sd is not None else np.zeros(n_use))
-    abs_err = (noise_floor / d_obs[use] if noise_floor > 0
-               else np.zeros(n_use))
-    sd_log = np.sqrt(rel_error**2 + std_rel**2 + abs_err**2)
-    w_d = 1.0 / sd_log   # always (n_use,) array — required by analytic jac
+    g_sd = (np.asarray(gate_sd, dtype=float)[use]
+            if gate_sd is not None else np.zeros(n_use))
+    sd_abs = np.sqrt((rel_error * np.abs(d_use)) ** 2
+                     + np.nan_to_num(g_sd) ** 2 + noise_floor ** 2)
+    sd_abs = np.maximum(sd_abs, 1e-300)             # rel_error=0 pathological guard
 
-    # per-gate prediction floor for the sign-safe log transform (#53): 0.1% of
-    # the datum. A prediction below this is already a >3-decade misfit — deep in
-    # "awful fit" territory — so the log branch governs every reasonable model
-    # and only the non-physical pred→0/negative region gets the linear penalty.
-    eps_pred = 1e-3 * d_obs[use]
+    # asinh transform of the data (#78): the same per-gate error sets the
+    # transform scale s, so the linear (sign-crossing) region spans exactly the
+    # noise band. Data error propagated through the transform → weights.
+    td = _asinh_scaled(d_use, sd_abs)
+    sd_t = sd_abs * _dasinh_scaled(d_use, sd_abs)   # = sd_abs/sqrt((2s)²+d²)
+    w_d = 1.0 / sd_t   # always (n_use,) array — required by analytic jac
 
     # cell-size-weighted vertical first-difference operator (#11):
     # penalize roughness per metre, not per interface — log-spaced meshes
@@ -303,22 +316,22 @@ def invert_sounding(
     def _chi(m_):
         pred = fwd.predict_log(m_, bird_height_m)
         return float(np.sqrt(np.mean(
-            ((_log_floored(pred[use], eps_pred) - log_d) / sd_log) ** 2)))
+            (w_d * (_asinh_scaled(pred[use], sd_abs) - td)) ** 2)))
 
     def _solve(m_start, alpha):
         sqrt_a = np.sqrt(alpha)
 
         def residuals(m_):
             pred = fwd.predict_log(m_, bird_height_m)
-            r_data = w_d * (_log_floored(pred[use], eps_pred) - log_d)
+            r_data = w_d * (_asinh_scaled(pred[use], sd_abs) - td)
             return np.concatenate([r_data, sqrt_a * (Dw @ m_),
                                    sqrt_as * (m_ - m_ref)])
 
         def jac(m_):
             pred, J_full = fwd.predict_and_jacobian(m_, bird_height_m)
-            # d/dm _log_floored(pred) = dlog_floored(pred) * dpred/dm — nonzero
-            # even where pred <= 0, so no zero-gradient cliff (#53)
-            dfac = _dlog_floored(pred[use], eps_pred)
+            # d/dm asinh(pred/2s) = dpred/dm / sqrt((2s)²+pred²) — strictly
+            # positive everywhere, so sign-crossing trials keep a gradient (#78)
+            dfac = _dasinh_scaled(pred[use], sd_abs)
             J_data = w_d[:, None] * J_full[use] * dfac[:, None]
             return np.vstack([J_data, sqrt_a * Dw, sqrt_as * np.eye(n)])
 
@@ -372,7 +385,7 @@ def invert_sounding(
 
     # Linearized appraisal from the analytic Jacobian at the accepted model (#58)
     pred_f, J_f = fwd.predict_and_jacobian(m, bird_height_m)
-    dfac_f = _dlog_floored(pred_f[use], eps_pred)             # sign-safe (#53)
+    dfac_f = _dasinh_scaled(pred_f[use], sd_abs)              # sign-safe (#78)
     J_data_f = w_d[:, None] * J_f[use] * dfac_f[:, None]      # (n_use, n_layers)
 
     # DOI via CUMULATIVE column sensitivity (#7): the earlier version thresholded
@@ -501,7 +514,7 @@ def invert_line(
         # gates the misfit will actually use — computed ONCE (#93): the same
         # mask feeds n_gates_used, the chi margin, and the exported gate_used
         # so QC-clean-but-censored gates are visible to interpreters
-        gate_used = np.isfinite(data[i]) & (data[i] > censor_threshold)
+        gate_used = np.isfinite(data[i]) & (np.abs(data[i]) > censor_threshold)
         try:
             rho, chi, ok, doi_m, rho_sd = invert_sounding(
                 fwd, data[i], rho_initial=rho_start, **kwargs)

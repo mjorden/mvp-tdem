@@ -239,19 +239,28 @@ def plotly_sounding_fit(
 ) -> go.Figure:
     """Observed vs predicted decay + recovered 1D model — two-panel diagnostic.
 
-    gate_used (#93): mask of gates the misfit actually used; finite gates outside
-    it (censored near-floor / negative) are drawn as open grey markers so fitted
-    and displayed-but-ignored data are distinguishable.
+    gate_used (#93): mask of gates the misfit actually used. Finite gates
+    outside it (near-floor, censored regardless of sign, #78) are open grey
+    markers; USED negative gates (real IP/bipolar signal, inverted via the
+    asinh transform) are open blue diamonds at |value|.
     """
     t = np.asarray(gate_times_ms, dtype=float)
-    finite_pos = np.isfinite(d_obs) & (d_obs > 0)
-    use = finite_pos if gate_used is None else (finite_pos & gate_used)
+    finite = np.isfinite(d_obs)
+    if gate_used is None:
+        used_pos = finite & (d_obs > 0)
+        used_neg = np.zeros_like(used_pos)
+        excl = np.zeros_like(used_pos)
+    else:
+        gu = np.asarray(gate_used, dtype=bool)
+        used_pos = finite & gu & (d_obs > 0)
+        used_neg = finite & gu & (d_obs < 0)
+        excl = finite & ~gu
 
     fig = make_subplots(rows=1, cols=2, subplot_titles=("Decay fit", "1D model"))
 
     fig.add_trace(
         go.Scatter(
-            x=t[use], y=d_obs[use],
+            x=t[used_pos], y=d_obs[used_pos],
             mode="markers",
             marker=dict(color="black", size=5),
             name="observed (fit)",
@@ -259,20 +268,30 @@ def plotly_sounding_fit(
         ),
         row=1, col=1,
     )
-    if gate_used is not None:
-        excl = np.isfinite(d_obs) & ~np.asarray(gate_used, dtype=bool)
-        if excl.any():
-            fig.add_trace(
-                go.Scatter(
-                    x=t[excl], y=np.abs(d_obs[excl]),
-                    mode="markers",
-                    marker=dict(symbol="circle-open", color="gray", size=6),
-                    name="excluded (censored/negative)",
-                    hovertemplate=("t=%{x:.3f} ms<br>|obs|=%{y:.2e}<br>"
-                                   "NOT used in the fit<extra></extra>"),
-                ),
-                row=1, col=1,
-            )
+    if used_neg.any():
+        fig.add_trace(
+            go.Scatter(
+                x=t[used_neg], y=np.abs(d_obs[used_neg]),
+                mode="markers",
+                marker=dict(symbol="diamond-open", color="royalblue", size=7),
+                name="observed negative (fit, |value|)",
+                hovertemplate=("t=%{x:.3f} ms<br>obs=-%{y:.2e}<br>"
+                               "negative gate, USED in the fit (#78)<extra></extra>"),
+            ),
+            row=1, col=1,
+        )
+    if excl.any():
+        fig.add_trace(
+            go.Scatter(
+                x=t[excl], y=np.abs(d_obs[excl]),
+                mode="markers",
+                marker=dict(symbol="circle-open", color="gray", size=6),
+                name="excluded (near-floor)",
+                hovertemplate=("t=%{x:.3f} ms<br>|obs|=%{y:.2e}<br>"
+                               "NOT used in the fit<extra></extra>"),
+            ),
+            row=1, col=1,
+        )
     fig.add_trace(
         go.Scatter(
             x=t, y=d_pred,
