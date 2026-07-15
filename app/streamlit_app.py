@@ -282,8 +282,14 @@ with tab_section:
                 config["gate_times_ms"],
                 s.rho, s.depths,
                 title=f"Fiducial {sel_fid}  chi={s.chi:.2f}  converged={s.converged}",
+                gate_used=s.gate_used,   # #93: grey out censored-but-QC-clean gates
             )
             st.plotly_chart(fit_fig, use_container_width=True)
+            if s.gate_used is not None and not s.gate_used.all():
+                st.caption(
+                    f"Open grey markers: {int((~s.gate_used).sum())} gate(s) shown "
+                    "but NOT used by the misfit (censored near-floor or negative)."
+                )
 
 
 # ── Decays tab ───────────────────────────────────────────────────────────────

@@ -95,6 +95,9 @@ class SoundingResult:
     # Linearized appraisal from the analytic Jacobian at the accepted model (#58/#12)
     doi_m: float | None = None          # depth of investigation, metres
     rho_sd: np.ndarray | None = None    # per-layer multiplicative uncertainty (10^σ_m)
+    # per-gate mask of what the misfit actually used (#93): False = finite but
+    # censored (negative / near-floor) — visible in decay plots yet never fit
+    gate_used: np.ndarray | None = None
 
 
 # Basal half-space cell: the deepest layer has no lower interface in the mesh,
@@ -495,6 +498,10 @@ def invert_line(
             gate_sd=g_sd,                           # #61: per-gate sd from stacking
             censor_factor=censor_factor,            # #11: same factor as n_gates_used
         )
+        # gates the misfit will actually use — computed ONCE (#93): the same
+        # mask feeds n_gates_used, the chi margin, and the exported gate_used
+        # so QC-clean-but-censored gates are visible to interpreters
+        gate_used = np.isfinite(data[i]) & (data[i] > censor_threshold)
         try:
             rho, chi, ok, doi_m, rho_sd = invert_sounding(
                 fwd, data[i], rho_initial=rho_start, **kwargs)
@@ -515,8 +522,7 @@ def invert_line(
             if warm_start and not np.isscalar(rho_start):
                 rho2, chi2, ok2, doi_m2, rho_sd2 = invert_sounding(
                     fwd, data[i], rho_initial=inv["rho_initial"], **kwargs)
-                n_gates_i = int((np.isfinite(data[i]) & (data[i] > censor_threshold)).sum())
-                chi_margin = max(0.1, 1.0 / np.sqrt(2 * max(n_gates_i, 1)))
+                chi_margin = max(0.1, 1.0 / np.sqrt(2 * max(int(gate_used.sum()), 1)))
                 if chi2 < chi - chi_margin:
                     rho, chi, ok, doi_m, rho_sd = rho2, chi2, ok2, doi_m2, rho_sd2
         except ValueError:
@@ -540,11 +546,11 @@ def invert_line(
             # censoring threshold), not merely finite — negatives and near-floor
             # gates are finite but excluded, so the old count overstated data
             # support and made weakly-constrained soundings look well-resolved.
-            n_gates_used=int((np.isfinite(data[i])
-                              & (data[i] > censor_threshold)).sum()),
+            n_gates_used=int(gate_used.sum()),
             converged=ok,
             doi_m=doi_m,
             rho_sd=rho_sd,
+            gate_used=gate_used,                    # #93: per-gate misfit mask
         ))
 
         if warm_start:
