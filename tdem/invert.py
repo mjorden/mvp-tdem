@@ -5,7 +5,7 @@ Approach
 --------
 Occam-style regularized least squares on m = log10(resistivity) per layer:
 
-    minimize  || W_d (log d_obs - log d_pred(m)) ||²
+    minimize  || W_d (f(d_obs) - f(d_pred(m))) ||²     f = scaled asinh (#78)
             + alpha_s || m - m_ref ||²
             + alpha   || W_z D m ||²      (cell-size-weighted vertical roughness)
 
@@ -105,7 +105,7 @@ class SoundingResult:
     doi_m: float | None = None          # depth of investigation, metres
     rho_sd: np.ndarray | None = None    # per-layer multiplicative uncertainty (10^σ_m)
     # per-gate mask of what the misfit actually used (#93): False = finite but
-    # censored (negative / near-floor) — visible in decay plots yet never fit
+    # amplitude-censored (|d| below the noise band) — visible in plots, never fit
     gate_used: np.ndarray | None = None
 
 
@@ -210,7 +210,7 @@ def invert_sounding(
     cooling_octaves: int = 4,
     gate_sd: np.ndarray | None = None,
     min_gates: int = 3,
-    censor_factor: float = 3.0,
+    censor_factor: float = 1.0,
     doi_cum_frac: float = 0.85,
 ) -> tuple[np.ndarray, float, bool, float, np.ndarray]:
     """
@@ -239,8 +239,13 @@ def invert_sounding(
                    Below this a ValueError is raised rather than returning a
                    model whose depth range is pure regularization.
     censor_factor: gates with amplitude <= censor_factor*noise_floor are dropped
-                   from the misfit to avoid the near-floor upward-selection bias
-                   (#27). No effect when noise_floor == 0.
+                   from the misfit. Default 1.0 (#71.8): with the symmetric asinh
+                   transform the old near-floor upward-selection bias (#27) is
+                   gone — negatives are kept, and near-floor gates are honestly
+                   down-weighted by the propagated error rather than discarded —
+                   so a gate above the QC floor carries real (weak) constraint.
+                   Raise to ~3 to reproduce the old hard-censoring behavior.
+                   No effect when noise_floor == 0.
     gate_sd      : optional (n_gates,) per-gate absolute standard deviation from
                    stacking (same units as d_obs).  When provided, combined in
                    quadrature with rel_error and noise_floor into the per-gate
@@ -462,7 +467,7 @@ def invert_line(
     # single source of truth for the censor factor (#11): the same value is
     # passed to invert_sounding AND used for the reported n_gates_used, so the
     # two cannot silently desync if the survey overrides it in the config
-    censor_factor = inv.get("censor_factor", 3.0)
+    censor_factor = inv.get("censor_factor", 1.0)
     censor_threshold = censor_factor * noise_floor if noise_floor > 0 else 0.0
 
     if fwd is None:

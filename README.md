@@ -91,7 +91,7 @@ Open `http://localhost:8501` in a browser.  The sidebar walks you through upload
 mvp-tdem/
 ├── tdem/
 │   ├── load.py          # CSV + JSON sidecar ingestion, column mapping, cleaning
-│   ├── qc.py            # 6 QC checks → _qc_* flags; nothing dropped, callers decide
+│   ├── qc.py            # 9 QC checks → _qc_* flags + crossover_stats; nothing dropped
 │   ├── forward.py       # SimPEG 1D TDEM forward wrapper (TDEMForward, per-height sim cache)
 │   ├── invert.py        # Occam-style per-sounding inversion + along-line warm-start stitching
 │   ├── visualize.py     # plot_section / plot_decays / plot_sounding_fit (matplotlib, Agg)
@@ -140,7 +140,7 @@ python scripts/ingest_flight.py --flight data/flights/F_SYNTH_01 \
 - EM response columns are **moment-normalized dB/dt in V/(A·m⁴)**, positive-decaying convention. Gate times are **milliseconds after turnoff** and live in the sidecar, not the CSV.
 - After loading, gates are standardised to `sfz_00, sfz_01, ...`; coordinates to `easting/northing/elevation` (GPS) and `dem` (radar altimeter = bird height AGL).
 - Dummy fill values (−9999 etc.) become NaN; all-NaN soundings are dropped at load time.
-- QC writes boolean flags (`True` = bad): per-sounding `_qc_neg_early`, `_qc_alt_low/high`, `_qc_dem_mismatch`, `_qc_spike`, `_qc_nonmono`, combined into `sounding_mask`; per-gate noise-floor flags in `_qc_gate_<nn>`. **QC never drops data** — `qc.good_soundings(df)` and `qc.good_gate_array(df)` apply the flags.
+- QC writes boolean flags (`True` = bad): per-sounding `_qc_neg_early`, `_qc_alt_low/high`, `_qc_dem_mismatch`, `_qc_spike`, `_qc_nonmono`, `_qc_spacing`, `_qc_alt_amp`, `_qc_stack_scatter` (#71), combined into `sounding_mask`; per-gate noise-floor flags in `_qc_gate_<nn>`. **QC never drops data** — `qc.good_soundings(df)` and `qc.good_gate_array(df)` apply the flags.
 - Inversion works on `m = log10(resistivity)` with a log-space data misfit; NaN gates are simply excluded from each sounding's misfit.
 
 ## Design notes

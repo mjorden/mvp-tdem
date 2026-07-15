@@ -197,6 +197,9 @@ with tab_qc:
             "_qc_dem_mismatch": "DEM/GPS mismatch",
             "_qc_spike": "Along-line spike",
             "_qc_nonmono": "Non-monotonic decay",
+            "_qc_spacing": "Station spacing (hover/gap)",
+            "_qc_alt_amp": "Amplitude-vs-altitude outlier",
+            "_qc_stack_scatter": "Stack scatter (powerline/sferic)",
         }
         rows = []
         for col in flag_cols:
